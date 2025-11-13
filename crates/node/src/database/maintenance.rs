@@ -62,6 +62,8 @@ impl DatabaseMaintenance {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use miden_objects::account::AccountId;
+    use miden_objects::testing::account_id::ACCOUNT_ID_MAX_ZEROES;
     use serial_test::serial;
 
     use super::*;
@@ -69,9 +71,13 @@ mod tests {
     use crate::test_utils::test_note_header;
     use crate::types::StoredNote;
 
+    fn default_test_account_id() -> AccountId {
+        AccountId::try_from(ACCOUNT_ID_MAX_ZEROES).unwrap()
+    }
+
     fn note_at(age: Duration) -> StoredNote {
         StoredNote {
-            header: test_note_header(),
+            header: test_note_header(default_test_account_id()),
             details: vec![1, 2, 3, 4],
             created_at: Utc::now() - age,
         }

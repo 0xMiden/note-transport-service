@@ -22,13 +22,15 @@ pub trait DatabaseBackend: Send + Sync {
     /// Store a new note
     async fn store_note(&self, note: &StoredNote) -> Result<(), DatabaseError>;
 
-    /// Fetch notes by tag
+    /// Fetch notes by tags
     ///
     /// Fetched notes must be after the provided cursor, up to some limit of notes.
     /// If limit is None, no limit is applied.
+    /// Notes from all tags are combined, ordered by timestamp globally, and the limit
+    /// is applied to the combined set.
     async fn fetch_notes(
         &self,
-        tag: NoteTag,
+        tags: &[NoteTag],
         cursor: u64,
         limit: Option<u32>,
     ) -> Result<Vec<StoredNote>, DatabaseError>;
@@ -82,14 +84,17 @@ impl Database {
         Ok(())
     }
 
-    /// Fetch notes by tag with cursor-based pagination
+    /// Fetch notes by tags with cursor-based pagination
+    ///
+    /// Notes from all tags are combined, ordered by timestamp globally, and the limit
+    /// is applied to the combined set.
     pub async fn fetch_notes(
         &self,
-        tag: NoteTag,
+        tags: &[NoteTag],
         cursor: u64,
         limit: Option<u32>,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
-        self.backend.fetch_notes(tag, cursor, limit).await
+        self.backend.fetch_notes(tags, cursor, limit).await
     }
 
     /// Get statistics about the database
@@ -111,12 +116,18 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use miden_objects::account::AccountId;
+    use miden_objects::testing::account_id::ACCOUNT_ID_MAX_ZEROES;
 
     use super::*;
     use crate::metrics::Metrics;
-    use crate::test_utils::test_note_header;
+    use crate::test_utils::{random_account_id, test_note_header};
 
     const TAG_LOCAL_ANY: u32 = 0xc000_0000;
+
+    fn default_test_account_id() -> AccountId {
+        AccountId::try_from(ACCOUNT_ID_MAX_ZEROES).unwrap()
+    }
 
     #[tokio::test]
     async fn test_sqlite_database() {
@@ -126,7 +137,7 @@ mod tests {
         let start = Utc::now();
 
         let note = StoredNote {
-            header: test_note_header(),
+            header: test_note_header(default_test_account_id()),
             details: vec![1, 2, 3, 4],
             created_at: Utc::now(),
         };
@@ -134,7 +145,7 @@ mod tests {
         db.store_note(&note).await.unwrap();
 
         let cursor = start.timestamp_micros().try_into().unwrap();
-        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor, None).await.unwrap();
+        let fetched_notes = db.fetch_notes(&[TAG_LOCAL_ANY.into()], cursor, None).await.unwrap();
         assert_eq!(fetched_notes.len(), 1);
         assert_eq!(fetched_notes[0].header.id(), note.header.id());
 
@@ -156,7 +167,7 @@ mod tests {
         // Create a note with a specific received_at time
         let received_time = Utc::now();
         let note = StoredNote {
-            header: test_note_header(),
+            header: test_note_header(default_test_account_id()),
             details: vec![1, 2, 3, 4],
             created_at: received_time,
         };
@@ -169,7 +180,7 @@ mod tests {
             .try_into()
             .unwrap();
         let fetched_notes =
-            db.fetch_notes(TAG_LOCAL_ANY.into(), before_cursor, None).await.unwrap();
+            db.fetch_notes(&[TAG_LOCAL_ANY.into()], before_cursor, None).await.unwrap();
         assert_eq!(fetched_notes.len(), 1);
         assert_eq!(fetched_notes[0].header.id(), note.header.id());
 
@@ -178,7 +189,8 @@ mod tests {
             .timestamp_micros()
             .try_into()
             .unwrap();
-        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), after_cursor, None).await.unwrap();
+        let fetched_notes =
+            db.fetch_notes(&[TAG_LOCAL_ANY.into()], after_cursor, None).await.unwrap();
         assert_eq!(fetched_notes.len(), 0);
     }
 
@@ -193,7 +205,7 @@ mod tests {
         let mut note_ids = Vec::new();
         for i in 0..5u8 {
             let note = StoredNote {
-                header: test_note_header(),
+                header: test_note_header(default_test_account_id()),
                 details: vec![i],
                 created_at: start + chrono::Duration::milliseconds(i64::from(i) * 10),
             };
@@ -204,14 +216,15 @@ mod tests {
         let cursor = 0;
 
         // Limit = 2
-        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor, Some(2)).await.unwrap();
+        let fetched_notes = db.fetch_notes(&[TAG_LOCAL_ANY.into()], cursor, Some(2)).await.unwrap();
         assert_eq!(fetched_notes.len(), 2);
         // Verify they are the first two notes in order
         assert_eq!(fetched_notes[0].header.id(), note_ids[0]);
         assert_eq!(fetched_notes[1].header.id(), note_ids[1]);
 
         // Limit larger than available notes
-        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor, Some(10)).await.unwrap();
+        let fetched_notes =
+            db.fetch_notes(&[TAG_LOCAL_ANY.into()], cursor, Some(10)).await.unwrap();
         assert_eq!(fetched_notes.len(), 5);
         // Verify all notes are returned in order
         for (i, note) in fetched_notes.iter().enumerate() {
@@ -219,7 +232,7 @@ mod tests {
         }
 
         // No limit
-        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor, None).await.unwrap();
+        let fetched_notes = db.fetch_notes(&[TAG_LOCAL_ANY.into()], cursor, None).await.unwrap();
         assert_eq!(fetched_notes.len(), 5);
         // Verify all notes are returned in order
         for (i, note) in fetched_notes.iter().enumerate() {
@@ -227,7 +240,94 @@ mod tests {
         }
 
         // Limit = 0
-        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor, Some(0)).await.unwrap();
+        let fetched_notes = db.fetch_notes(&[TAG_LOCAL_ANY.into()], cursor, Some(0)).await.unwrap();
         assert_eq!(fetched_notes.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_notes_multiple_tags() {
+        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
+            .await
+            .unwrap();
+        let start = Utc::now();
+
+        let account_id1 = random_account_id();
+        let tag1 = NoteTag::from_account_id(account_id1);
+
+        let account_id2 = random_account_id();
+        let tag2 = NoteTag::from_account_id(account_id2);
+
+        let account_id3 = random_account_id();
+        let tag3 = NoteTag::from_account_id(account_id3);
+
+        // Create notes with interleaved timestamps across 3 tags
+        // Tag1: 0, 30, 60
+        // Tag2: 10, 40, 70
+        // Tag3: 20, 50, 80
+
+        let mut tag1_note_ids = Vec::new();
+        let mut tag2_note_ids = Vec::new();
+        let mut tag3_note_ids = Vec::new();
+
+        // Create notes for tag1 at 0, 30, 60
+        for i in 0..3u8 {
+            let note = StoredNote {
+                header: test_note_header(account_id1),
+                details: vec![i],
+                created_at: start + chrono::Duration::milliseconds(i64::from(i) * 30),
+            };
+            tag1_note_ids.push(note.header.id());
+            db.store_note(&note).await.unwrap();
+
+            let note = StoredNote {
+                header: test_note_header(account_id2),
+                details: vec![i + 10],
+                created_at: start + chrono::Duration::milliseconds(i64::from(i) * 30 + 10),
+            };
+            tag2_note_ids.push(note.header.id());
+            db.store_note(&note).await.unwrap();
+
+            let note = StoredNote {
+                header: test_note_header(account_id3),
+                details: vec![i + 20],
+                created_at: start + chrono::Duration::milliseconds(i64::from(i) * 30 + 20),
+            };
+            tag3_note_ids.push(note.header.id());
+            db.store_note(&note).await.unwrap();
+        }
+
+        let cursor = 0;
+
+        // Fetch all tags, no limit
+        let fetched_notes = db.fetch_notes(&[tag1, tag2, tag3], cursor, None).await.unwrap();
+        assert_eq!(fetched_notes.len(), 9);
+        assert_eq!(fetched_notes[0].header.id(), tag1_note_ids[0]);
+        assert_eq!(fetched_notes[1].header.id(), tag2_note_ids[0]);
+        assert_eq!(fetched_notes[2].header.id(), tag3_note_ids[0]);
+        assert_eq!(fetched_notes[3].header.id(), tag1_note_ids[1]);
+        assert_eq!(fetched_notes[4].header.id(), tag2_note_ids[1]);
+        assert_eq!(fetched_notes[5].header.id(), tag3_note_ids[1]);
+        assert_eq!(fetched_notes[6].header.id(), tag1_note_ids[2]);
+        assert_eq!(fetched_notes[7].header.id(), tag2_note_ids[2]);
+        assert_eq!(fetched_notes[8].header.id(), tag3_note_ids[2]);
+
+        // Fetch all tags, limit of 5 notes
+        let fetched_notes = db.fetch_notes(&[tag1, tag2, tag3], cursor, Some(5)).await.unwrap();
+        assert_eq!(fetched_notes.len(), 5);
+        assert_eq!(fetched_notes[0].header.id(), tag1_note_ids[0]);
+        assert_eq!(fetched_notes[1].header.id(), tag2_note_ids[0]);
+        assert_eq!(fetched_notes[2].header.id(), tag3_note_ids[0]);
+        assert_eq!(fetched_notes[3].header.id(), tag1_note_ids[1]);
+        assert_eq!(fetched_notes[4].header.id(), tag2_note_ids[1]);
+
+        // Fetch only 2 tags, no limit
+        let fetched_notes = db.fetch_notes(&[tag1, tag2], cursor, None).await.unwrap();
+        assert_eq!(fetched_notes.len(), 6);
+        assert_eq!(fetched_notes[0].header.id(), tag1_note_ids[0]);
+        assert_eq!(fetched_notes[1].header.id(), tag2_note_ids[0]);
+        assert_eq!(fetched_notes[2].header.id(), tag1_note_ids[1]);
+        assert_eq!(fetched_notes[3].header.id(), tag2_note_ids[1]);
+        assert_eq!(fetched_notes[4].header.id(), tag1_note_ids[2]);
+        assert_eq!(fetched_notes[5].header.id(), tag2_note_ids[2]);
     }
 }

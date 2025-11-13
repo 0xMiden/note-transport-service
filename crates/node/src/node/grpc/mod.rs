@@ -1,6 +1,5 @@
 mod streaming;
 
-use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -165,29 +164,27 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         let timer = self.metrics.grpc_fetch_notes_request();
 
         let request_data = request.into_inner();
-        let tags = request_data.tags.into_iter().collect::<BTreeSet<_>>();
+        let tags: Vec<_> = request_data.tags.into_iter().map(std::convert::Into::into).collect();
         let cursor = request_data.cursor;
         let limit = request_data.limit;
 
+        let stored_notes = self
+            .database
+            .fetch_notes(&tags, cursor, limit)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
+
         let mut rcursor = cursor;
-        let mut proto_notes = vec![];
-        for tag in tags {
-            let stored_notes = self
-                .database
-                .fetch_notes(tag.into(), cursor, limit)
-                .await.map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
-
-            for stored_note in &stored_notes {
-                let ts_cursor: u64 = stored_note
-                    .created_at
-                    .timestamp_micros()
-                    .try_into()
-                    .map_err(|_| tonic::Status::internal("Timestamp too large for cursor"))?;
-                rcursor = rcursor.max(ts_cursor);
-            }
-
-            proto_notes.extend(stored_notes.into_iter().map(TransportNote::from));
+        for stored_note in &stored_notes {
+            let ts_cursor: u64 = stored_note
+                .created_at
+                .timestamp_micros()
+                .try_into()
+                .map_err(|_| tonic::Status::internal("Timestamp too large for cursor"))?;
+            rcursor = rcursor.max(ts_cursor);
         }
+
+        let proto_notes: Vec<_> = stored_notes.into_iter().map(TransportNote::from).collect();
 
         timer.finish("ok");
 
