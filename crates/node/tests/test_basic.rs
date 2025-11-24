@@ -51,8 +51,13 @@ async fn test_basic_pagination() -> Result<()> {
     assert_eq!(notes.len(), 2);
 
     // pagination, cursor after first note
-    let (notes, _) = client1.fetch_notes(&[tag], cursor_a).await?;
+    let (notes, cursor_b) = client1.fetch_notes(&[tag], cursor_a).await?;
     assert_eq!(notes.len(), 1);
+
+    // pagination, all notes fetched, cursor should not change
+    let (notes, cursor_c) = client1.fetch_notes(&[tag], cursor_b).await?;
+    assert_eq!(notes.len(), 0);
+    assert_eq!(cursor_c, cursor_b, "expected replied cursor same as request");
 
     handle.abort();
     Ok(())
