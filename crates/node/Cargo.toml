@@ -67,4 +67,7 @@ chrono = { workspace = true }
 rand = { workspace = true }
 
 [dev-dependencies]
-serial_test = { workspace = true }
+miden-lib                 = { default-features = false, git = "https://github.com/0xMiden/miden-base.git", rev = "e5ae2329735d2a89b6589375ca7fd91e4f104422" }
+miden-note-transport-node = { features = ["testing"], workspace = true }
+miden-testing             = { default-features = false, git = "https://github.com/0xMiden/miden-base.git", rev = "e5ae2329735d2a89b6589375ca7fd91e4f104422" }
+serial_test               = { workspace = true }

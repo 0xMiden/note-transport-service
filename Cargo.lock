@@ -100,6 +100,9 @@ name = "anyhow"
 version = "1.0.100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
+dependencies = [
+ "backtrace",
+]
 
 [[package]]
 name = "arrayref"
@@ -859,7 +862,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1597,6 +1600,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "miden-block-prover"
+version = "0.13.0"
+source = "git+https://github.com/0xMiden/miden-base.git?rev=e5ae2329735d2a89b6589375ca7fd91e4f104422#e5ae2329735d2a89b6589375ca7fd91e4f104422"
+dependencies = [
+ "miden-objects",
+ "thiserror",
+]
+
+[[package]]
 name = "miden-core"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1682,6 +1694,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "miden-lib"
+version = "0.13.0"
+source = "git+https://github.com/0xMiden/miden-base.git?rev=e5ae2329735d2a89b6589375ca7fd91e4f104422#e5ae2329735d2a89b6589375ca7fd91e4f104422"
+dependencies = [
+ "fs-err",
+ "miden-assembly",
+ "miden-core",
+ "miden-objects",
+ "miden-processor",
+ "miden-stdlib",
+ "rand",
+ "regex",
+ "thiserror",
+ "walkdir",
+]
+
+[[package]]
 name = "miden-mast-package"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1747,8 +1776,11 @@ dependencies = [
  "deadpool-sync",
  "diesel",
  "diesel_migrations",
+ "miden-lib",
+ "miden-note-transport-node",
  "miden-note-transport-proto",
  "miden-objects",
+ "miden-testing",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -1781,6 +1813,7 @@ dependencies = [
 name = "miden-note-transport-proto"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "fs-err",
  "miette",
  "prost 0.14.1",
@@ -1845,6 +1878,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "miden-prover"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84c30a5d10baeec17b9336de8544cb7f9b96b32de757c4cfb8d95ee0521bb5cd"
+dependencies = [
+ "miden-air",
+ "miden-debug-types",
+ "miden-processor",
+ "tracing",
+ "winter-maybe-async",
+ "winter-prover",
+]
+
+[[package]]
 name = "miden-stdlib"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1858,6 +1905,46 @@ dependencies = [
  "miden-processor",
  "miden-utils-sync",
  "thiserror",
+]
+
+[[package]]
+name = "miden-testing"
+version = "0.13.0"
+source = "git+https://github.com/0xMiden/miden-base.git?rev=e5ae2329735d2a89b6589375ca7fd91e4f104422#e5ae2329735d2a89b6589375ca7fd91e4f104422"
+dependencies = [
+ "anyhow",
+ "itertools",
+ "miden-block-prover",
+ "miden-lib",
+ "miden-objects",
+ "miden-processor",
+ "miden-tx",
+ "miden-tx-batch-prover",
+ "rand",
+ "rand_chacha",
+ "winterfell",
+]
+
+[[package]]
+name = "miden-tx"
+version = "0.13.0"
+source = "git+https://github.com/0xMiden/miden-base.git?rev=e5ae2329735d2a89b6589375ca7fd91e4f104422#e5ae2329735d2a89b6589375ca7fd91e4f104422"
+dependencies = [
+ "miden-lib",
+ "miden-objects",
+ "miden-processor",
+ "miden-prover",
+ "miden-verifier",
+ "thiserror",
+]
+
+[[package]]
+name = "miden-tx-batch-prover"
+version = "0.13.0"
+source = "git+https://github.com/0xMiden/miden-base.git?rev=e5ae2329735d2a89b6589375ca7fd91e4f104422#e5ae2329735d2a89b6589375ca7fd91e4f104422"
+dependencies = [
+ "miden-objects",
+ "miden-tx",
 ]
 
 [[package]]
@@ -2744,7 +2831,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3191,7 +3278,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.2",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3894,7 +3981,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4370,6 +4457,17 @@ dependencies = [
  "winter-fri",
  "winter-math",
  "winter-utils",
+]
+
+[[package]]
+name = "winterfell"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43f824ddd5aec8ca6a54307f20c115485a8a919ea94dd26d496d856ca6185f4f"
+dependencies = [
+ "winter-air",
+ "winter-prover",
+ "winter-verifier",
 ]
 
 [[package]]
