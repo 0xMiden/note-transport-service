@@ -100,6 +100,7 @@ impl DatabaseBackend for SqliteDatabase {
         &self,
         tag: NoteTag,
         cursor: u64,
+        limit: Option<u32>,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
         let timer = self.metrics.db_fetch_notes();
 
@@ -111,11 +112,18 @@ impl DatabaseBackend for SqliteDatabase {
         let notes: Vec<Note> = self
             .transact("fetch notes", move |conn| {
                 use schema::notes::dsl::{created_at, notes, tag};
-                let fetched_notes = notes
+                let mut query = notes
                     .filter(tag.eq(tag_value))
                     .filter(created_at.gt(cursor_i64))
                     .order(created_at.asc())
-                    .load::<Note>(conn)?;
+                    .into_boxed();
+
+                if let Some(limit_val) = limit {
+                    let limit_i64 = i64::from(limit_val);
+                    query = query.limit(limit_i64);
+                }
+
+                let fetched_notes = query.load::<Note>(conn)?;
                 Ok(fetched_notes)
             })
             .await?;

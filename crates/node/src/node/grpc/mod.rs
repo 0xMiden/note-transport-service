@@ -167,13 +167,14 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         let request_data = request.into_inner();
         let tags = request_data.tags.into_iter().collect::<BTreeSet<_>>();
         let cursor = request_data.cursor;
+        let limit = request_data.limit;
 
         let mut rcursor = cursor;
         let mut proto_notes = vec![];
         for tag in tags {
             let stored_notes = self
                 .database
-                .fetch_notes(tag.into(), cursor)
+                .fetch_notes(tag.into(), cursor, limit)
                 .await.map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
 
             for stored_note in &stored_notes {

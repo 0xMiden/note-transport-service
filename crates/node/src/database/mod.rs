@@ -23,10 +23,14 @@ pub trait DatabaseBackend: Send + Sync {
     async fn store_note(&self, note: &StoredNote) -> Result<(), DatabaseError>;
 
     /// Fetch notes by tag
+    ///
+    /// Fetched notes must be after the provided cursor, up to some limit of notes.
+    /// If limit is None, no limit is applied.
     async fn fetch_notes(
         &self,
         tag: NoteTag,
         cursor: u64,
+        limit: Option<u32>,
     ) -> Result<Vec<StoredNote>, DatabaseError>;
 
     /// Get statistics about the database
@@ -83,8 +87,9 @@ impl Database {
         &self,
         tag: NoteTag,
         cursor: u64,
+        limit: Option<u32>,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
-        self.backend.fetch_notes(tag, cursor).await
+        self.backend.fetch_notes(tag, cursor, limit).await
     }
 
     /// Get statistics about the database
@@ -128,10 +133,8 @@ mod tests {
 
         db.store_note(&note).await.unwrap();
 
-        let fetched_notes = db
-            .fetch_notes(TAG_LOCAL_ANY.into(), start.timestamp_micros().try_into().unwrap())
-            .await
-            .unwrap();
+        let cursor = start.timestamp_micros().try_into().unwrap();
+        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor, None).await.unwrap();
         assert_eq!(fetched_notes.len(), 1);
         assert_eq!(fetched_notes[0].header.id(), note.header.id());
 
@@ -145,7 +148,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_notes_timestamp_filtering() {
+    async fn test_fetch_notes_pagination() {
         let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
             .await
             .unwrap();
@@ -165,7 +168,8 @@ mod tests {
             .timestamp_micros()
             .try_into()
             .unwrap();
-        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), before_cursor).await.unwrap();
+        let fetched_notes =
+            db.fetch_notes(TAG_LOCAL_ANY.into(), before_cursor, None).await.unwrap();
         assert_eq!(fetched_notes.len(), 1);
         assert_eq!(fetched_notes[0].header.id(), note.header.id());
 
@@ -174,7 +178,56 @@ mod tests {
             .timestamp_micros()
             .try_into()
             .unwrap();
-        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), after_cursor).await.unwrap();
+        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), after_cursor, None).await.unwrap();
+        assert_eq!(fetched_notes.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_notes_limit() {
+        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
+            .await
+            .unwrap();
+        let start = Utc::now();
+
+        // Create 5 notes with slightly different timestamps
+        let mut note_ids = Vec::new();
+        for i in 0..5u8 {
+            let note = StoredNote {
+                header: test_note_header(),
+                details: vec![i],
+                created_at: start + chrono::Duration::milliseconds(i64::from(i) * 10),
+            };
+            note_ids.push(note.header.id());
+            db.store_note(&note).await.unwrap();
+        }
+
+        let cursor = 0;
+
+        // Limit = 2
+        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor, Some(2)).await.unwrap();
+        assert_eq!(fetched_notes.len(), 2);
+        // Verify they are the first two notes in order
+        assert_eq!(fetched_notes[0].header.id(), note_ids[0]);
+        assert_eq!(fetched_notes[1].header.id(), note_ids[1]);
+
+        // Limit larger than available notes
+        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor, Some(10)).await.unwrap();
+        assert_eq!(fetched_notes.len(), 5);
+        // Verify all notes are returned in order
+        for (i, note) in fetched_notes.iter().enumerate() {
+            assert_eq!(note.header.id(), note_ids[i]);
+        }
+
+        // No limit
+        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor, None).await.unwrap();
+        assert_eq!(fetched_notes.len(), 5);
+        // Verify all notes are returned in order
+        for (i, note) in fetched_notes.iter().enumerate() {
+            assert_eq!(note.header.id(), note_ids[i]);
+        }
+
+        // Limit = 0
+        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor, Some(0)).await.unwrap();
         assert_eq!(fetched_notes.len(), 0);
     }
 }
