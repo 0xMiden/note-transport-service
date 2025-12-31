@@ -1,3 +1,4 @@
+mod rate_limit;
 mod streaming;
 
 use std::collections::BTreeSet;
@@ -25,6 +26,7 @@ use tower::limit::GlobalConcurrencyLimitLayer;
 use tower::timeout::TimeoutLayer;
 use tower_http::cors::{Any, CorsLayer};
 
+pub use self::rate_limit::RateLimitConfig;
 use self::streaming::{NoteStreamer, StreamerMessage, Sub, Subface};
 use crate::database::Database;
 use crate::metrics::MetricsGrpc;
@@ -50,6 +52,10 @@ pub struct GrpcServerConfig {
     pub max_connections: usize,
     /// Connection timeout in seconds
     pub request_timeout: usize,
+    /// Rate limiting configuration
+    pub rate_limit: RateLimitConfig,
+    /// TCP keepalive interval in seconds (None to disable)
+    pub tcp_keepalive_secs: Option<u64>,
 }
 
 /// Streaming task interface context
@@ -66,6 +72,8 @@ impl Default for GrpcServerConfig {
             max_note_size: 512_000,
             max_connections: 4096,
             request_timeout: 4,
+            rate_limit: RateLimitConfig::default(),
+            tcp_keepalive_secs: Some(60),
         }
     }
 }
@@ -92,11 +100,22 @@ impl GrpcServer {
             .map_err(|e| crate::Error::Internal(format!("Invalid address: {e}")))?;
 
         let cors = CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any);
+        let rate_limit_layer = rate_limit::RateLimitLayer::new(&self.config.rate_limit);
 
-        tonic::transport::Server::builder()
+        let mut builder = tonic::transport::Server::builder()
             .accept_http1(true)
+            // TCP settings
+            .tcp_nodelay(true);
+
+        // TCP keepalive
+        if let Some(keepalive_secs) = self.config.tcp_keepalive_secs {
+            builder = builder.tcp_keepalive(Some(Duration::from_secs(keepalive_secs)));
+        }
+
+        builder
             .layer(cors)
             .layer(GrpcWebLayer::new())
+            .layer(rate_limit_layer)
             .layer(GlobalConcurrencyLimitLayer::new(self.config.max_connections))
             .layer(TimeoutLayer::new(Duration::from_secs(self.config.request_timeout as u64)))
             .add_service(health_svc)

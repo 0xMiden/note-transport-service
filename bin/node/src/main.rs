@@ -1,7 +1,7 @@
 use clap::Parser;
 use miden_note_transport_node::database::DatabaseConfig;
 use miden_note_transport_node::logging::{TracingConfig, setup_tracing};
-use miden_note_transport_node::node::grpc::GrpcServerConfig;
+use miden_note_transport_node::node::grpc::{GrpcServerConfig, RateLimitConfig};
 use miden_note_transport_node::{Node, NodeConfig, Result};
 use tracing::info;
 
@@ -36,6 +36,20 @@ struct Args {
     /// Connection timeout in seconds
     #[arg(long, default_value = "4")]
     request_timeout: usize,
+
+    // Rate limiting settings
+    /// Rate limit: requests per second per IP
+    #[arg(long, default_value = "50")]
+    rate_limit_rps: u32,
+
+    /// Rate limit: burst size (allows temporary spikes)
+    #[arg(long, default_value = "100")]
+    rate_limit_burst: u32,
+
+    // TCP settings
+    /// TCP keepalive interval in seconds (0 to disable)
+    #[arg(long, default_value = "60")]
+    tcp_keepalive: u64,
 }
 
 #[tokio::main]
@@ -53,11 +67,16 @@ async fn main() -> Result<()> {
     info!("Database: {}", args.database_url);
     info!("Max note size: {} bytes", args.max_note_size);
     info!("Retention days: {}", args.retention_days);
+    info!("Rate limit: {} req/s, burst: {}", args.rate_limit_rps, args.rate_limit_burst);
+    info!("TCP keepalive: {}s", args.tcp_keepalive);
     info!(
         "Telemetry: OpenTelemetry={}, JSON={}",
         tracing_cfg.otel.is_enabled(),
         tracing_cfg.json_format
     );
+
+    // Helper to convert 0 to None for optional duration settings
+    let opt_nonzero = |v: u64| if v == 0 { None } else { Some(v) };
 
     // Create Node config
     let config = NodeConfig {
@@ -67,6 +86,11 @@ async fn main() -> Result<()> {
             max_note_size: args.max_note_size,
             max_connections: args.max_connections,
             request_timeout: args.request_timeout,
+            rate_limit: RateLimitConfig {
+                requests_per_second: args.rate_limit_rps,
+                burst_size: args.rate_limit_burst,
+            },
+            tcp_keepalive_secs: opt_nonzero(args.tcp_keepalive),
         },
         database: DatabaseConfig {
             url: args.database_url,

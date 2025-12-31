@@ -64,7 +64,14 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 
 # General
-rand = { workspace = true }
+futures = { workspace = true }
+rand    = { workspace = true }
+
+# Rate limiting
+governor = { version = "0.8" }
+
+# HTTP types
+http = { version = "1" }
 
 [dev-dependencies]
 serial_test = { workspace = true }
