@@ -16,7 +16,7 @@ use miden_note_transport_proto::miden_note_transport::{
     StreamNotesRequest,
     TransportNote,
 };
-use miden_objects::utils::Deserializable;
+use miden_protocol::utils::serde::Deserializable;
 use rand::Rng;
 use tokio::sync::mpsc;
 use tonic::Status;
@@ -138,7 +138,7 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         }
 
         // Convert protobuf request to internal types
-        let header = miden_objects::note::NoteHeader::read_from_bytes(&pnote.header)
+        let header = miden_protocol::note::NoteHeader::read_from_bytes(&pnote.header)
             .map_err(|e| Status::invalid_argument(format!("Invalid header: {e:?}")))?;
 
         // Create note for database

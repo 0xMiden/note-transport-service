@@ -1,7 +1,7 @@
-use miden_objects::account::AccountId;
-use miden_objects::note::{NoteExecutionHint, NoteHeader, NoteId, NoteMetadata, NoteTag, NoteType};
-use miden_objects::testing::account_id::ACCOUNT_ID_MAX_ZEROES;
-use miden_objects::{Felt, Word};
+use miden_protocol::account::AccountId;
+use miden_protocol::note::{NoteHeader, NoteId, NoteMetadata, NoteTag, NoteType};
+use miden_protocol::testing::account_id::ACCOUNT_ID_MAX_ZEROES;
+use miden_protocol::{Felt, Word};
 use rand::Rng;
 
 /// Generate a random [`NoteId`]
@@ -24,16 +24,17 @@ pub fn random_note_id() -> NoteId {
     NoteId::new(recipient, asset_commitment)
 }
 
+/// Tag value for local notes
+pub const TAG_LOCAL_ANY: u32 = 0xc000_0000;
+
 /// Generate a private [`NoteHeader`] with random sender
 pub fn test_note_header() -> NoteHeader {
     let id = random_note_id();
     let sender = AccountId::try_from(ACCOUNT_ID_MAX_ZEROES).unwrap();
     let note_type = NoteType::Private;
-    let tag = NoteTag::from_account_id(sender);
-    let aux = Felt::try_from(0xffff_ffff_0000_0000u64).unwrap();
-    let execution_hint = NoteExecutionHint::None;
+    let tag = NoteTag::new(TAG_LOCAL_ANY);
 
-    let metadata = NoteMetadata::new(sender, note_type, tag, execution_hint, aux).unwrap();
+    let metadata = NoteMetadata::new(sender, note_type, tag);
 
     NoteHeader::new(id, metadata)
 }

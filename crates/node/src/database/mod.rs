@@ -109,9 +109,7 @@ mod tests {
 
     use super::*;
     use crate::metrics::Metrics;
-    use crate::test_utils::test_note_header;
-
-    const TAG_LOCAL_ANY: u32 = 0xc000_0000;
+    use crate::test_utils::{TAG_LOCAL_ANY, test_note_header};
 
     #[tokio::test]
     async fn test_sqlite_database() {
