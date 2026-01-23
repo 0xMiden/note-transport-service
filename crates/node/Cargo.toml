@@ -25,7 +25,7 @@ testing = []
 miden-note-transport-proto = { workspace = true }
 
 # Miden
-miden-objects = { features = ["testing"], workspace = true }
+miden-protocol = { features = ["testing"], workspace = true }
 
 # gRPC server and client
 tokio        = { workspace = true }

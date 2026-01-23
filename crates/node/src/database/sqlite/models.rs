@@ -1,6 +1,6 @@
 use chrono::DateTime;
 use diesel::prelude::*;
-use miden_objects::utils::{Deserializable, Serializable};
+use miden_protocol::utils::serde::{Deserializable, Serializable};
 
 use super::schema::notes;
 use crate::database::DatabaseError;
