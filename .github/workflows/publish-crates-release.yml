@@ -51,7 +51,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
-          cargo publish --workspace
+          cargo publish --workspace --dry-run
 
       - name: Cleanup cargo package artifacts (after dry-run)
         if: always()
