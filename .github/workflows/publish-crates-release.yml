@@ -48,8 +48,6 @@ jobs:
 
       - name: Preflight - publish dry run
         continue-on-error: true
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
           cargo publish --workspace --dry-run
 
@@ -59,7 +57,5 @@ jobs:
           rm -rf "$CARGO_TARGET_DIR/package" || true
 
       - name: Publish crates
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
           cargo publish --workspace
