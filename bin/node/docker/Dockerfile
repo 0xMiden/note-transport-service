@@ -1,5 +1,7 @@
 # Miden Note Transport Node
-FROM rust:1.87-slim-bullseye AS builder
+FROM rust:1.90-slim-bookworm as builder
+
+
 
 RUN apt-get update && \
     apt-get -y upgrade && \
@@ -11,10 +13,11 @@ COPY ./Cargo.toml .
 COPY ./Cargo.lock .
 COPY ./bin ./bin
 COPY ./crates ./crates
+COPY ./proto ./proto
 
 RUN cargo install --path bin/node --locked
 
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 # Update machine & install required packages
 # The installation of sqlite3 is needed for correct function of the SQLite database
