@@ -2,7 +2,7 @@ name: Dry Run Publish Rust Crates
 
 on:
   push:
-    branches: [main]
+    branches: [main, next, 'release/**']
 
 permissions:
   contents: read
