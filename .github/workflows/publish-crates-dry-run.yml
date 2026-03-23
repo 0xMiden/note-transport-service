@@ -26,7 +26,5 @@ jobs:
           rustup update --no-self-update
 
       - name: Dry run - publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
           cargo publish --workspace --dry-run
