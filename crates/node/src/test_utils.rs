@@ -34,7 +34,7 @@ pub fn test_note_header() -> NoteHeader {
     let note_type = NoteType::Private;
     let tag = NoteTag::new(TAG_LOCAL_ANY);
 
-    let metadata = NoteMetadata::new(sender, note_type, tag);
+    let metadata = NoteMetadata::new(sender, note_type).with_tag(tag);
 
     NoteHeader::new(id, metadata)
 }
