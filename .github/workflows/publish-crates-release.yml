@@ -6,10 +6,12 @@ on:
 
 permissions:
   contents: read
+  id-token: write  # Required for OIDC token exchange with crates.io
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: release
     env:
       CARGO_TERM_COLOR: always
       # Important: use an absolute path so `cargo publish` verification builds
@@ -45,6 +47,10 @@ jobs:
         run: |
           rustup update --no-self-update
 
+      - name: Authenticate with crates.io
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
       - name: Preflight - publish dry run
         continue-on-error: true
         run: |
@@ -56,5 +62,7 @@ jobs:
           rm -rf "$CARGO_TARGET_DIR/package" || true
 
       - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           cargo publish --workspace
