@@ -1774,7 +1774,7 @@ dependencies = [
 
 [[package]]
 name = "miden-note-transport-node"
-version = "0.3.0-alpha.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "miden-note-transport-node-bin"
-version = "0.3.0-alpha.1"
+version = "0.3.0"
 dependencies = [
  "clap",
  "miden-note-transport-node",
@@ -1816,7 +1816,7 @@ dependencies = [
 
 [[package]]
 name = "miden-note-transport-proto"
-version = "0.3.0-alpha.1"
+version = "0.3.0"
 dependencies = [
  "fs-err",
  "miette",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "miden-note-transport-proto-build"
-version = "0.3.0-alpha.1"
+version = "0.3.0"
 dependencies = [
  "fs-err",
  "miette",
