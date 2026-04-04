@@ -11,16 +11,16 @@ license      = "MIT"
 readme       = "README.md"
 repository   = "https://github.com/0xMiden/miden-note-transport"
 rust-version = "1.87"
-version      = "0.2.0"
+version      = "0.3.0"
 
 [workspace.dependencies]
 # Workspace crates (path-based dependencies)
-miden-note-transport-node        = { path = "crates/node", version = "0.2" }
-miden-note-transport-proto       = { path = "crates/proto", version = "0.2" }
-miden-note-transport-proto-build = { path = "proto", version = "0.2" }
+miden-note-transport-node        = { path = "crates/node", version = "0.3.0" }
+miden-note-transport-proto       = { path = "crates/proto", version = "0.3.0" }
+miden-note-transport-proto-build = { path = "proto", version = "0.3.0" }
 
 # miden-base aka protocol dependencies (git = "https://github.com/0xMiden/miden-base"). These should be updated in sync.
-miden-protocol = { default-features = false, version = "0.13" }
+miden-protocol = { default-features = false, version = "0.14.0" }
 
 # Other miden dependencies. These should align with those expected by miden-base.
 
@@ -62,12 +62,6 @@ tower-http = { features = ["cors"], version = "0.6" }
 tracing = { version = "0.1" }
 tracing-opentelemetry = { version = "0.31" }
 tracing-subscriber = { features = ["env-filter", "fmt", "json"], version = "0.3" }
-wasm-bindgen = { features = ["serde-serialize"], version = "0.2" }
-wasm-bindgen-futures = { version = "0.4" }
-web-sys = { features = ["console"], version = "0.3" }
-
-# Web-specific dependencies
-js-sys = { version = "0.3" }
 
 # Lints are set to warn for development, which are promoted to errors in CI.
 [workspace.lints.clippy]
