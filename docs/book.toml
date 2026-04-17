@@ -6,7 +6,7 @@ multilingual = false
 title        = "The Miden Transport Layer Node Operator and Developer Guide"
 
 [output.html]
-git-repository-url = "https://github.com/0xMiden/miden-private-transport"
+git-repository-url = "https://github.com/0xMiden/note-transport-service"
 
 [preprocessor.katex]
 after = ["links"]

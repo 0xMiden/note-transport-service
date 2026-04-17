@@ -2,8 +2,9 @@
 
 We provide logging to `stdout` and an optional [OpenTelemetry](https://opentelemetry.io/) exporter for our metrics and traces.
 
-OpenTelemetry exporting can be enabled by specifying `--enable-otel` via the command-line or the
-`MIDEN_TLNODE_ENABLE_OTEL` environment variable when operating the node.
+OpenTelemetry exporting can be enabled by setting the `OTEL_ENABLED=true` environment variable when operating
+the node. The OTLP endpoint (default `http://localhost:4317`) can be overridden with `OTEL_TRACES_ENDPOINT`, and
+structured JSON logging to `stdout` can be enabled with `JSON_LOGGING=true`.
 
 ## Metrics
 
@@ -11,27 +12,26 @@ Various metrics associated with the RPC requests and database operations are pro
 
 ### RPC metrics
 
-| name                               | type                | description                                       |
-|------------------------------------|---------------------|---------------------------------------------------|
-| `send_note_count`                  | Counter             | number of `send_note` requests                    |
-| `send_note_duration`               | Histogram (seconds) | duration of `send_note` requests                  |
-| `send_note_size`                   | Histogram (bytes)   | size of received notes in `send_note` requests    |
-| `fetch_notes_count`                | Counter             | number of `fetch_notes` requests                  |
-| `fetch_notes_duration`             | Histogram (seconds) | duration of `fetch_notes` requests                |
-| `fetch_notes_replied_notes_number` | Counter             | number of replied notes in `fetch_notes` requests |
-| `fetch_notes_replied_notes_size`   | Histogram (bytes)   | size of replied notes in `fetch_notes` requests   |
+| name                                    | type                | description                                       |
+|-----------------------------------------|---------------------|---------------------------------------------------|
+| `grpc_send_note_count`                  | Counter             | number of `send_note` requests                    |
+| `grpc_send_note_duration`               | Histogram (seconds) | duration of `send_note` requests                  |
+| `grpc_send_note_note_size`              | Histogram (bytes)   | size of received notes in `send_note` requests    |
+| `grpc_fetch_notes_count`                | Counter             | number of `fetch_notes` requests                  |
+| `grpc_fetch_notes_duration`             | Histogram (seconds) | duration of `fetch_notes` requests                |
+| `grpc_fetch_notes_replied_notes_number` | Histogram           | number of replied notes in `fetch_notes` requests |
+| `grpc_fetch_notes_replied_notes_size`   | Histogram (bytes)   | size of replied notes in `fetch_notes` requests   |
 
 ### Database metrics
 
-| name                                 | type                | description                                |
-|--------------------------------------|---------------------|--------------------------------------------|
-| `store_note_count`                   | Counter             | number of `store_note` operations          |
-| `store_note_duration`                | Histogram (seconds) | duration of `store_note` operations        |
-| `fetch_notes_count`                  | Counter             | number of `fetch_notes` operations         |
-| `fetch_notes_duration`               | Histogram (seconds) | duration of `fetch_notes` operations       |
-| `maintenance_cleanup_notes_count`    | Counter             | number of `cleanup_old_notes` operations   |
-| `maintenance_cleanup_notes_duration` | Histogram (seconds) | duration of `cleanup_old_notes` operations |
-}
+| name                                    | type                | description                                |
+|-----------------------------------------|---------------------|--------------------------------------------|
+| `db_store_note_count`                   | Counter             | number of `store_note` operations          |
+| `db_store_note_duration`                | Histogram (seconds) | duration of `store_note` operations        |
+| `db_fetch_notes_count`                  | Counter             | number of `fetch_notes` operations         |
+| `db_fetch_notes_duration`               | Histogram (seconds) | duration of `fetch_notes` operations       |
+| `db_maintenance_cleanup_notes_count`    | Counter             | number of `cleanup_old_notes` operations   |
+| `db_maintenance_cleanup_notes_duration` | Histogram (seconds) | duration of `cleanup_old_notes` operations |
 
 ## Traces
 
@@ -75,14 +75,16 @@ export RUST_LOG=debug
 
 ## Configuration
 
-The OpenTelemetry trace exporter is enabled by adding the `--enable-otel` flag to the node's start command:
+The OpenTelemetry trace and metrics exporters are enabled by setting `OTEL_ENABLED=true` when starting the node:
 
 ```sh
-miden-private-transport-node-bin --enable-otel
+OTEL_ENABLED=true \
+OTEL_TRACES_ENDPOINT=http://localhost:4317 \
+miden-note-transport-node-bin
 ```
 
-The exporter can be configured using environment variables as specified in the official
-[documents](https://opentelemetry.io/docs/specs/otel/protocol/exporter/).
+Further exporter behaviour can be configured using the standard OpenTelemetry environment variables as specified in the
+official [documents](https://opentelemetry.io/docs/specs/otel/protocol/exporter/).
 
 <div class="warning">
 Not all options are fully supported. We are limited to what the Rust OpenTelemetry implementation supports. If you have any problems please open an issue and we'll do our best to resolve it.

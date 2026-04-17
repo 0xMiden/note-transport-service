@@ -14,7 +14,7 @@ It is also a good idea to familiarize yourself with the [operator manual](../ope
 Living documents go stale - the code is the final arbitrator of truth.
 
 If you encounter any outdated, incorrect or misleading information, please
-[open an issue](https://github.com/0xMiden/miden-private-transport/issues/new/choose).
+[open an issue](https://github.com/0xMiden/note-transport-service/issues/new/choose).
 
 </div>
 

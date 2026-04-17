@@ -4,4 +4,4 @@ Welcome to the `Miden` Transport Layer node operator guide which should cover ev
 Miden Transport Layer node.
 
 You can report any issues, ask questions or leave feedback at our project repo
-[here](https://github.com/0xMiden/miden-private-transport/issues/new/choose).
+[here](https://github.com/0xMiden/note-transport-service/issues/new/choose).

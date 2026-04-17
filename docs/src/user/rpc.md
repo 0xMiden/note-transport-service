@@ -2,8 +2,8 @@
 
 This is a reference of the Node's public RPC interface. It consists of a gRPC API which may be used to exchange notes with the Transport Layer.
 
-The gRPC service definition can be found in the Miden Transport Layer's `proto` crate
-[directory](https://github.com/0xMiden/miden-private-transport/tree/main/crates/proto) in the `miden-private-transport.proto` file.
+The gRPC service definition can be found in the Miden Transport Layer's `proto`
+[directory](https://github.com/0xMiden/note-transport-service/tree/main/proto/proto) in the `miden_note_transport.proto` file.
 
 <!--toc:start-->
 

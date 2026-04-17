@@ -31,6 +31,6 @@ The node itself may also be referred to as the transport layer.
 ## Feedback
 
 Please report any issues, ask questions or leave feedback in the node repository
-[here](https://github.com/0xMiden/miden-private-transport/issues/new/choose).
+[here](https://github.com/0xMiden/note-transport-service/issues/new/choose).
 
 This includes outdated, misleading, incorrect or just plain confusing information :)

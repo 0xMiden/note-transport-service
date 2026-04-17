@@ -4,7 +4,7 @@ The Miden Transport Layer currently can only be installed from source using the 
 
 ## Install using `cargo`
 
-Install Rust version **1.89** or greater using the official Rust installation
+Install Rust version **1.87** or greater using the official Rust installation
 [instructions](https://www.rust-lang.org/tools/install).
 
 Depending on the platform, you may need to install additional libraries. For example, on Ubuntu 22.04 the following
@@ -18,16 +18,16 @@ Then use `cargo` to compile the node from the source code:
 
 ```sh
 # Install latest version
-cargo install --locked --git https://github.com/0xMiden/miden-private-transport miden-private-transport-node-bin
+cargo install --locked --git https://github.com/0xMiden/note-transport-service miden-note-transport-node-bin
 
 # Install from a specific branch
-cargo install --locked --git https://github.com/0xMiden/miden-private-transport miden-private-transport-node-bin --branch <branch>
+cargo install --locked --git https://github.com/0xMiden/note-transport-service miden-note-transport-node-bin --branch <branch>
 
 # Install a specific tag
-cargo install --locked --git https://github.com/0xMiden/miden-private-transport miden-private-transport-node-bin --tag <tag>
+cargo install --locked --git https://github.com/0xMiden/note-transport-service miden-note-transport-node-bin --tag <tag>
 
 # Install a specific git revision
-cargo install --locked --git https://github.com/0xMiden/miden-private-transport miden-private-transport-node-bin --rev <git-sha>
+cargo install --locked --git https://github.com/0xMiden/note-transport-service miden-note-transport-node-bin --rev <git-sha>
 ```
 
 More information on the various `cargo install` options can be found
@@ -40,10 +40,10 @@ With Docker installed on your system, a Docker setup is provided that also inclu
 Clone the repository:
 
 ```sh
-git clone https://github.com/0xMiden/miden-private-transport
+git clone https://github.com/0xMiden/note-transport-service
 ```
 
-Then, move into the directory, `cd miden-private-transport`, and run `make docker-node-up` to start the node and monitoring stack.
+Then, move into the directory, `cd note-transport-service`, and run `make docker-node-up` to start the node and monitoring stack.
 To stop the stack, run `make docker-node-down`.
 
 Grafana will be accessible at `localhost:3000`.

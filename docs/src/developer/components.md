@@ -24,7 +24,7 @@ This component persists the private notes in a SQLite database. Currently, there
 
 ### Migrations
 
-Migration support is provided but not in use yet, given that the node is under heavy development.
+Schema migrations are embedded via `diesel_migrations` and applied automatically on node startup.
 
 ### Database maintenance
 
