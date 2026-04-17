@@ -18,7 +18,14 @@ pub type IpRateLimiter =
     RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock, NoOpMiddleware<QuantaInstant>>;
 
 /// How often idle-IP entries are purged from the state store.
-const RETAIN_INTERVAL: Duration = Duration::from_secs(60);
+const RETAIN_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Sentinel bucket for requests whose client IP cannot be determined. In
+/// practice the tonic transport always attaches `TcpConnectInfo`, so this
+/// branch should never fire in production — but rather than let unidentified
+/// traffic bypass the limiter, we key all such requests to a single shared
+/// bucket and rate-limit them together.
+const UNKNOWN_IP_BUCKET: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
 
 /// Configuration for rate limiting.
 #[derive(Debug, Clone)]
@@ -100,23 +107,23 @@ pub struct RateLimitService<S> {
 }
 
 impl<S> RateLimitService<S> {
-    /// Client IP used for rate-limit bucketing, or `None` if it cannot be
-    /// determined (in which case the request is allowed through — we prefer
-    /// that over lumping unrelated requests into a shared bucket).
-    fn extract_ip<B>(&self, req: &Request<B>) -> Option<IpAddr> {
+    /// Client IP used for rate-limit bucketing. Falls back to
+    /// [`UNKNOWN_IP_BUCKET`] when the IP cannot be determined, so
+    /// unidentified traffic is still rate-limited (shared bucket).
+    fn extract_ip<B>(&self, req: &Request<B>) -> IpAddr {
         if self.trust_forwarded_headers {
             if let Some(ip) = req.headers().get("x-forwarded-for").and_then(parse_forwarded_for) {
-                return Some(ip);
+                return ip;
             }
             if let Some(ip) = req.headers().get("x-real-ip").and_then(parse_single_ip) {
-                return Some(ip);
+                return ip;
             }
         }
 
         req.extensions()
             .get::<tonic::transport::server::TcpConnectInfo>()
             .and_then(tonic::transport::server::TcpConnectInfo::remote_addr)
-            .map(|addr| addr.ip())
+            .map_or(UNKNOWN_IP_BUCKET, |addr| addr.ip())
     }
 }
 
@@ -171,12 +178,11 @@ where
     }
 
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
-        if let Some(ip) = self.extract_ip(&req) {
-            if self.limiter.check_key(&bucket(ip)).is_err() {
-                return futures::future::Either::Right(std::future::ready(Ok(
-                    rate_limit_exceeded_response(),
-                )));
-            }
+        let key = bucket(self.extract_ip(&req));
+        if self.limiter.check_key(&key).is_err() {
+            return futures::future::Either::Right(std::future::ready(Ok(
+                rate_limit_exceeded_response(),
+            )));
         }
 
         futures::future::Either::Left(self.inner.call(req))
@@ -209,28 +215,28 @@ mod tests {
     async fn extract_ip_honors_forwarded_for_when_trusted() {
         let svc = service(true);
         let req = req_with_headers(&[("x-forwarded-for", "203.0.113.1, 10.0.0.1")]);
-        assert_eq!(svc.extract_ip(&req), Some("203.0.113.1".parse().unwrap()));
+        assert_eq!(svc.extract_ip(&req), "203.0.113.1".parse::<IpAddr>().unwrap());
     }
 
     #[tokio::test]
     async fn extract_ip_ignores_forwarded_for_when_untrusted() {
         let svc = service(false);
         let req = req_with_headers(&[("x-forwarded-for", "203.0.113.1")]);
-        assert_eq!(svc.extract_ip(&req), None);
+        assert_eq!(svc.extract_ip(&req), UNKNOWN_IP_BUCKET);
     }
 
     #[tokio::test]
     async fn extract_ip_falls_back_to_real_ip_when_trusted() {
         let svc = service(true);
         let req = req_with_headers(&[("x-real-ip", "198.51.100.7")]);
-        assert_eq!(svc.extract_ip(&req), Some("198.51.100.7".parse().unwrap()));
+        assert_eq!(svc.extract_ip(&req), "198.51.100.7".parse::<IpAddr>().unwrap());
     }
 
     #[tokio::test]
-    async fn extract_ip_ignores_malformed_forwarded_for() {
+    async fn extract_ip_falls_back_to_unknown_bucket_on_malformed_forwarded_for() {
         let svc = service(true);
         let req = req_with_headers(&[("x-forwarded-for", "not-an-ip")]);
-        assert_eq!(svc.extract_ip(&req), None);
+        assert_eq!(svc.extract_ip(&req), UNKNOWN_IP_BUCKET);
     }
 
     #[test]
