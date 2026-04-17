@@ -34,6 +34,8 @@ deadpool = { default-features = false, features = ["managed", "rt_tokio_1"], ver
 deadpool-sync = { version = "0.1" }
 fs-err = { version = "3" }
 futures = { version = "0.3" }
+governor = { version = "0.8" }
+http = { version = "1" }
 miette = { version = "7.6" }
 opentelemetry = { version = "0.30" }
 opentelemetry-otlp = { default-features = false, features = [

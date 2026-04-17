@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use clap::Parser;
 use miden_note_transport_node::database::DatabaseConfig;
 use miden_note_transport_node::logging::{TracingConfig, setup_tracing};
@@ -38,13 +40,18 @@ struct Args {
     request_timeout: usize,
 
     // Rate limiting settings
-    /// Rate limit: requests per second per IP
+    /// Rate limit: sustained requests per second per IP
     #[arg(long, default_value = "50")]
-    rate_limit_rps: u32,
+    rate_limit_rps: NonZeroU32,
 
-    /// Rate limit: burst size (allows temporary spikes)
+    /// Rate limit: burst size (max tokens in the bucket)
     #[arg(long, default_value = "100")]
-    rate_limit_burst: u32,
+    rate_limit_burst: NonZeroU32,
+
+    /// Trust `X-Forwarded-For` / `X-Real-IP` headers when identifying the client.
+    /// Only enable when the server sits behind a trusted reverse proxy.
+    #[arg(long, default_value_t = false)]
+    rate_limit_trust_forwarded_headers: bool,
 
     // TCP settings
     /// TCP keepalive interval in seconds (0 to disable)
@@ -67,16 +74,22 @@ async fn main() -> Result<()> {
     info!("Database: {}", args.database_url);
     info!("Max note size: {} bytes", args.max_note_size);
     info!("Retention days: {}", args.retention_days);
-    info!("Rate limit: {} req/s, burst: {}", args.rate_limit_rps, args.rate_limit_burst);
-    info!("TCP keepalive: {}s", args.tcp_keepalive);
+    info!(
+        "Rate limit: {} req/s, burst: {}, trust forwarded headers: {}",
+        args.rate_limit_rps, args.rate_limit_burst, args.rate_limit_trust_forwarded_headers,
+    );
+    if args.tcp_keepalive == 0 {
+        info!("TCP keepalive: disabled");
+    } else {
+        info!("TCP keepalive: {}s", args.tcp_keepalive);
+    }
     info!(
         "Telemetry: OpenTelemetry={}, JSON={}",
         tracing_cfg.otel.is_enabled(),
         tracing_cfg.json_format
     );
 
-    // Helper to convert 0 to None for optional duration settings
-    let opt_nonzero = |v: u64| if v == 0 { None } else { Some(v) };
+    let tcp_keepalive_secs = (args.tcp_keepalive != 0).then_some(args.tcp_keepalive);
 
     // Create Node config
     let config = NodeConfig {
@@ -89,8 +102,9 @@ async fn main() -> Result<()> {
             rate_limit: RateLimitConfig {
                 requests_per_second: args.rate_limit_rps,
                 burst_size: args.rate_limit_burst,
+                trust_forwarded_headers: args.rate_limit_trust_forwarded_headers,
             },
-            tcp_keepalive_secs: opt_nonzero(args.tcp_keepalive),
+            tcp_keepalive_secs,
         },
         database: DatabaseConfig {
             url: args.database_url,
