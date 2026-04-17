@@ -1,9 +1,10 @@
 # Navigating the codebase
 
-The code is organised using a Rust workspace with two crates (`miden-note-transport-node` and `miden-note-transport-proto`) and a binary (`miden-note-transport-node-bin`):
+The code is organised as a Rust workspace with four members:
 
 - `miden-note-transport-node` (at `crates/node`): Primary node library. Contains all of the node logic;
-- `miden-note-transport-proto` (at `crates/proto`): gRPC protobuf definitions and associated auto-generated Rust code. Both clients and node use this crate to establish communications;
+- `miden-note-transport-proto` (at `crates/proto`): Generated Rust types and service stubs for the node's gRPC API. Clients and node depend on this crate to establish communications;
+- `miden-note-transport-proto-build` (at `proto`): Holds the canonical `.proto` files and the build-time code generation used by `miden-note-transport-proto`;
 - `miden-note-transport-node-bin` (at `bin/node`): Running node binary. Instantiation and wrapper of the node library.
 
 -------
