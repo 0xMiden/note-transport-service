@@ -28,6 +28,6 @@ Schema migrations are embedded via `diesel_migrations` and applied automatically
 
 ### Database maintenance
 
-Database maintenance is provided by a separate task. Currently this is only a periodic cleanup of older notes -- notes which have exceeded the defined retention period.
+Database maintenance is provided by a separate task. Currently this is only a periodic cleanup of older notes -- notes which have exceeded the configured retention period (default 30 days, set via the [`--retention-days`](https://github.com/0xMiden/note-transport-service/blob/main/bin/node/src/main.rs) CLI flag).
 
 A running task is spawned dedicated to this maintenance service.

@@ -1,6 +1,6 @@
 # Configuration and Usage
 
-Configuration and operation of the Miden Transport Layer node is simple.
+Configuration and operation of the Miden Transport Service node is simple.
 
 
 ## Operation

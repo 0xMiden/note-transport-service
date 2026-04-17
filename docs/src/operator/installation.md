@@ -1,6 +1,6 @@
 # Installation
 
-The Miden Transport Layer currently can only be installed from source using the Rust package manager `cargo`, or by using the Docker setup provided in the repository.
+The Miden Transport Service currently can only be installed from source using the Rust package manager `cargo`, or by using the Docker setup provided in the repository.
 
 ## Install using `cargo`
 

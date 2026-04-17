@@ -1,6 +1,6 @@
 # Developer Guide
 
-Welcome to the developer guide for the `miden` transport layer node :)
+Welcome to the developer guide for the Miden Transport Service node :)
 
 This is intended to serve as a basic introduction to the codebase as well as covering relevant concepts and recording
 architectural decisions.
@@ -18,4 +18,4 @@ If you encounter any outdated, incorrect or misleading information, please
 
 </div>
 
-Please also see the `miden-node` contribution [guidelines](https://0xmiden.github.io/miden-node/developer/contributing.html) and monitoring [guide](https://0xmiden.github.io/miden-node/developer/monitoring.html) as these also apply here.
+Please also see the [`miden-node`](https://github.com/0xMiden/node) contribution [guidelines](https://0xmiden.github.io/node/contributing.html) and monitoring [guide](https://0xmiden.github.io/node/monitoring.html) as these also apply here.
