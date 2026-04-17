@@ -68,10 +68,10 @@ futures = { workspace = true }
 rand    = { workspace = true }
 
 # Rate limiting
-governor = { version = "0.8" }
+governor = { workspace = true }
 
 # HTTP types
-http = { version = "1" }
+http = { workspace = true }
 
 [dev-dependencies]
 serial_test = { workspace = true }
