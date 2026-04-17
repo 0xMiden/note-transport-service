@@ -23,18 +23,13 @@ should consult them before upgrading.
 
 ## Compatibility with `miden-protocol`
 
-The node depends on a specific version of [`miden-protocol`](https://github.com/0xMiden/miden-base),
+The node depends on a specific version of [`miden-protocol`](https://github.com/0xMiden/protocol),
 pinned in the workspace
 [`Cargo.toml`](https://github.com/0xMiden/note-transport-service/blob/main/Cargo.toml).
-`miden-protocol` defines the Note encoding that travels over the gRPC wire, so clients sending
-notes must serialize them with a compatible `miden-protocol` version.
+`miden-protocol` defines the on-wire layout of `Note` and the other core objects travelling over
+the gRPC API, so clients sending or receiving notes must serialize them with a compatible
+`miden-protocol` version.
 
-When the node's pinned `miden-protocol` bumps, senders and receivers must follow. These bumps
-are called out in the release notes.
-
-## Compatibility with `miden-client`
-
-The canonical client implementation lives in
-[`miden-client`](https://github.com/0xMiden/miden-client) and is versioned independently. Each
-Transport Service release notes the `miden-client` range it has been tested against; when
-upgrading either side, check the corresponding release notes on both projects.
+Because of that coupling, a change to how `Note` (or any other protocol object carried by the
+gRPC API) is defined upstream can be a breaking change for this service, and will trigger a
+corresponding version bump here. These bumps are called out in the release notes.

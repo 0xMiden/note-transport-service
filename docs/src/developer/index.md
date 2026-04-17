@@ -18,4 +18,4 @@ If you encounter any outdated, incorrect or misleading information, please
 
 </div>
 
-Please also see the [`miden-node`](https://github.com/0xMiden/node) contribution [guidelines](https://0xmiden.github.io/node/contributing.html) and monitoring [guide](https://0xmiden.github.io/node/monitoring.html) as these also apply here.
+Please also see the [`miden-node`](https://github.com/0xMiden/node) contribution [guidelines](https://github.com/0xMiden/node?tab=contributing-ov-file) and monitoring [guide](https://docs.miden.xyz/core-concepts/miden-node/operator/monitoring) as these also apply here.
