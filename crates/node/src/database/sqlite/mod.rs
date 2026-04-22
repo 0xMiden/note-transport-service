@@ -77,8 +77,8 @@ impl DatabaseBackend for SqliteDatabase {
         // return a partial view, which silently loses note data under load.
         //
         // Two ways to fix for an in-memory DB:
-        //   1. `file::memory:?cache=shared` — SQLite URI syntax that makes all
-        //      connections share the SAME in-memory DB via shared cache.
+        //   1. `file::memory:?cache=shared` — SQLite URI syntax that makes all connections share
+        //      the SAME in-memory DB via shared cache.
         //   2. Pool with `max_size=1` so only one connection exists.
         //
         // We pick #2 for simplicity and portability (URI mode requires the

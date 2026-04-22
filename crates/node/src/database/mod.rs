@@ -186,12 +186,17 @@ mod tests {
         // Fetch everything and assert INSERT order = read order = seq ascending.
         let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
         assert_eq!(fetched.len(), 2);
-        assert!(fetched[0].seq < fetched[1].seq, "expected monotonic seq; got {} then {}", fetched[0].seq, fetched[1].seq);
+        assert!(
+            fetched[0].seq < fetched[1].seq,
+            "expected monotonic seq; got {} then {}",
+            fetched[0].seq,
+            fetched[1].seq
+        );
         assert_eq!(fetched[0].details, vec![1]);
         assert_eq!(fetched[1].details, vec![2]);
 
         // Cursor between the two seqs returns only the second.
-        let mid_cursor = fetched[0].seq as u64;
+        let mid_cursor = u64::try_from(fetched[0].seq).expect("seq is non-negative");
         let after_first = db.fetch_notes(TAG_LOCAL_ANY.into(), mid_cursor).await.unwrap();
         assert_eq!(after_first.len(), 1);
         assert_eq!(after_first[0].details, vec![2]);
@@ -208,13 +213,16 @@ mod tests {
         // With the pool clamped to size=1 for `:memory:`, all ops go to the
         // same connection and see the same DB.
         use std::sync::Arc;
+
         use tokio::task::JoinSet;
 
         const TAG_A: u32 = 0x3d9c_0000;
         const TAG_B: u32 = 0x47ac_0000;
 
         let db = Arc::new(
-            Database::connect(DatabaseConfig::default(), Metrics::default().db).await.unwrap(),
+            Database::connect(DatabaseConfig::default(), Metrics::default().db)
+                .await
+                .unwrap(),
         );
 
         // Spawn many concurrent writers — more than the old max_size=16 — so
@@ -238,7 +246,11 @@ mod tests {
 
         let fetched_a = db.fetch_notes(TAG_A.into(), 0).await.unwrap();
         let fetched_b = db.fetch_notes(TAG_B.into(), 0).await.unwrap();
-        assert_eq!(fetched_a.len() + fetched_b.len(), 40, "all 40 concurrent writes should be visible");
+        assert_eq!(
+            fetched_a.len() + fetched_b.len(),
+            40,
+            "all 40 concurrent writes should be visible"
+        );
 
         let (total, _) = db.get_stats().await.unwrap();
         assert_eq!(total, 40, "stats should reflect all 40 rows");
@@ -266,7 +278,8 @@ mod tests {
         assert!(stored_seq > 0, "expected seq > 0, got {stored_seq}");
 
         // cursor = the note's own seq → strictly-greater filter excludes it
-        let after = db.fetch_notes(TAG_LOCAL_ANY.into(), stored_seq as u64).await.unwrap();
+        let cursor = u64::try_from(stored_seq).expect("seq is non-negative");
+        let after = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor).await.unwrap();
         assert_eq!(after.len(), 0);
     }
 }
