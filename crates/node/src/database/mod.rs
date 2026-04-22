@@ -116,22 +116,21 @@ mod tests {
         let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
             .await
             .unwrap();
-        let start = Utc::now();
 
         let note = StoredNote {
             header: test_note_header(),
             details: vec![1, 2, 3, 4],
             created_at: Utc::now(),
+            seq: 0, // ignored on INSERT
         };
 
         db.store_note(&note).await.unwrap();
 
-        let fetched_notes = db
-            .fetch_notes(TAG_LOCAL_ANY.into(), start.timestamp_micros().try_into().unwrap())
-            .await
-            .unwrap();
+        // Cursor is now seq-based; 0 fetches everything.
+        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
         assert_eq!(fetched_notes.len(), 1);
         assert_eq!(fetched_notes[0].header.id(), note.header.id());
+        assert!(fetched_notes[0].seq > 0);
 
         // Test note exists
         assert!(db.note_exists(note.header.id()).await.unwrap());
@@ -143,36 +142,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_notes_timestamp_filtering() {
+    async fn test_fetch_notes_seq_cursor_filtering() {
         let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
             .await
             .unwrap();
 
-        // Create a note with a specific received_at time
-        let received_time = Utc::now();
         let note = StoredNote {
             header: test_note_header(),
             details: vec![1, 2, 3, 4],
-            created_at: received_time,
+            created_at: Utc::now(),
+            seq: 0, // ignored on INSERT
         };
 
         db.store_note(&note).await.unwrap();
 
-        // Fetch notes with cursor before the note was received - should return the note
-        let before_cursor = (received_time - chrono::Duration::seconds(1))
-            .timestamp_micros()
-            .try_into()
-            .unwrap();
-        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), before_cursor).await.unwrap();
-        assert_eq!(fetched_notes.len(), 1);
-        assert_eq!(fetched_notes[0].header.id(), note.header.id());
+        // cursor=0 is strictly before any assigned seq → should return the note
+        let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        assert_eq!(fetched.len(), 1);
+        let stored_seq = fetched[0].seq;
+        assert!(stored_seq > 0, "expected seq > 0, got {stored_seq}");
 
-        // Fetch notes with cursor after the note was received - should return empty
-        let after_cursor = (received_time + chrono::Duration::seconds(1))
-            .timestamp_micros()
-            .try_into()
-            .unwrap();
-        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), after_cursor).await.unwrap();
-        assert_eq!(fetched_notes.len(), 0);
+        // cursor = the note's own seq → strictly-greater filter excludes it
+        let after = db.fetch_notes(TAG_LOCAL_ANY.into(), stored_seq as u64).await.unwrap();
+        assert_eq!(after.len(), 0);
     }
 }

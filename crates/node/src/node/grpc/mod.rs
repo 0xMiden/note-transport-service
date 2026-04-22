@@ -146,6 +146,8 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             header,
             details: pnote.details,
             created_at: Utc::now(),
+            // Ignored on INSERT: the DB assigns seq via AUTOINCREMENT.
+            seq: 0,
         };
 
         self.database
@@ -177,12 +179,11 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
                 .await.map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
 
             for stored_note in &stored_notes {
-                let ts_cursor: u64 = stored_note
-                    .created_at
-                    .timestamp_micros()
+                let seq_cursor: u64 = stored_note
+                    .seq
                     .try_into()
-                    .map_err(|_| tonic::Status::internal("Timestamp too large for cursor"))?;
-                rcursor = rcursor.max(ts_cursor);
+                    .map_err(|_| tonic::Status::internal("Negative seq in stored note"))?;
+                rcursor = rcursor.max(seq_cursor);
             }
 
             proto_notes.extend(stored_notes.into_iter().map(TransportNote::from));

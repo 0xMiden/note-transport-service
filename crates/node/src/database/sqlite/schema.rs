@@ -1,7 +1,8 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
-    notes (id) {
+    notes (seq) {
+        seq -> BigInt,
         id -> Binary,
         tag -> BigInt,
         header -> Binary,
