@@ -29,6 +29,17 @@ pub trait DatabaseBackend: Send + Sync {
         cursor: u64,
     ) -> Result<Vec<StoredNote>, DatabaseError>;
 
+    /// Fetch notes matching ANY of a set of tags, in a single DB snapshot.
+    ///
+    /// This is the preferred multi-tag query — running per-tag queries back
+    /// to back reopens a race where a concurrent INSERT can land between two
+    /// per-tag queries and get leapfrogged by the cursor advance.
+    async fn fetch_notes_by_tags(
+        &self,
+        tags: &[NoteTag],
+        cursor: u64,
+    ) -> Result<Vec<StoredNote>, DatabaseError>;
+
     /// Get statistics about the database
     async fn get_stats(&self) -> Result<(u64, u64), DatabaseError>;
 
@@ -85,6 +96,15 @@ impl Database {
         cursor: u64,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
         self.backend.fetch_notes(tag, cursor).await
+    }
+
+    /// Fetch notes matching ANY of a set of tags, in a single DB snapshot.
+    pub async fn fetch_notes_by_tags(
+        &self,
+        tags: &[NoteTag],
+        cursor: u64,
+    ) -> Result<Vec<StoredNote>, DatabaseError> {
+        self.backend.fetch_notes_by_tags(tags, cursor).await
     }
 
     /// Get statistics about the database

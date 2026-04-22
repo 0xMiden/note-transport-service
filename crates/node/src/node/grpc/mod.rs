@@ -167,27 +167,33 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         let timer = self.metrics.grpc_fetch_notes_request();
 
         let request_data = request.into_inner();
-        let tags = request_data.tags.into_iter().collect::<BTreeSet<_>>();
+        // Deduplicate incoming tags — the DB query is more efficient without repeats
+        // and the previous per-tag loop happened to dedupe via BTreeSet.
+        let tag_set: BTreeSet<_> = request_data.tags.into_iter().collect();
+        let tags: Vec<crate::types::NoteTag> = tag_set.into_iter().map(Into::into).collect();
         let cursor = request_data.cursor;
 
+        // Single-snapshot fetch across ALL tags. Running per-tag queries back
+        // to back exposed a race where a concurrent INSERT could land between
+        // two per-tag queries and get leapfrogged when rcursor advanced past
+        // its seq on the next fetch. A single `tag IN (…)` query reads all
+        // matching rows in one consistent snapshot.
+        let stored_notes = self
+            .database
+            .fetch_notes_by_tags(&tags, cursor)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
+
         let mut rcursor = cursor;
-        let mut proto_notes = vec![];
-        for tag in tags {
-            let stored_notes = self
-                .database
-                .fetch_notes(tag.into(), cursor)
-                .await.map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
-
-            for stored_note in &stored_notes {
-                let seq_cursor: u64 = stored_note
-                    .seq
-                    .try_into()
-                    .map_err(|_| tonic::Status::internal("Negative seq in stored note"))?;
-                rcursor = rcursor.max(seq_cursor);
-            }
-
-            proto_notes.extend(stored_notes.into_iter().map(TransportNote::from));
+        for stored_note in &stored_notes {
+            let seq_cursor: u64 = stored_note
+                .seq
+                .try_into()
+                .map_err(|_| tonic::Status::internal("Negative seq in stored note"))?;
+            rcursor = rcursor.max(seq_cursor);
         }
+
+        let proto_notes: Vec<_> = stored_notes.into_iter().map(TransportNote::from).collect();
 
         timer.finish("ok");
 

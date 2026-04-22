@@ -118,21 +118,37 @@ impl DatabaseBackend for SqliteDatabase {
         tag: NoteTag,
         cursor: u64,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
+        self.fetch_notes_by_tags(&[tag], cursor).await
+    }
+
+    #[tracing::instrument(skip(self, tags), fields(operation = "db.fetch_notes_by_tags"))]
+    async fn fetch_notes_by_tags(
+        &self,
+        tags: &[NoteTag],
+        cursor: u64,
+    ) -> Result<Vec<StoredNote>, DatabaseError> {
         let timer = self.metrics.db_fetch_notes();
 
         let cursor_i64: i64 = cursor.try_into().map_err(|_| {
             DatabaseError::QueryExecution("Cursor too large for SQLite".to_string())
         })?;
 
-        let tag_value = i64::from(tag.as_u32());
+        if tags.is_empty() {
+            timer.finish("ok");
+            return Ok(Vec::new());
+        }
+
+        let tag_values: Vec<i64> = tags.iter().map(|t| i64::from(t.as_u32())).collect();
+
+        // Single query for all tags runs in ONE DB snapshot, so a concurrent
+        // INSERT can't land between per-tag queries and get leapfrogged by the
+        // cursor advance. This closes the second half of the pagination race
+        // (the monotonic `seq` column closed the timestamp-collision half).
         let notes: Vec<Note> = self
-            .transact("fetch notes", move |conn| {
-                // Paginate on `seq` (AUTOINCREMENT row id assigned at INSERT
-                // commit), not `created_at`. See migration
-                // 20260422000000_add_seq_cursor for the race this fixes.
+            .transact("fetch notes by tags", move |conn| {
                 use schema::notes::dsl::{notes, seq, tag};
                 let fetched_notes = notes
-                    .filter(tag.eq(tag_value))
+                    .filter(tag.eq_any(&tag_values))
                     .filter(seq.gt(cursor_i64))
                     .order(seq.asc())
                     .load::<Note>(conn)?;
