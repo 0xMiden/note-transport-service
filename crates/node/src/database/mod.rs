@@ -142,6 +142,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_seq_assigned_monotonically_in_insert_order() {
+        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
+            .await
+            .unwrap();
+
+        let first = StoredNote {
+            header: test_note_header(),
+            details: vec![1],
+            created_at: Utc::now(),
+            seq: 0,
+        };
+        db.store_note(&first).await.unwrap();
+
+        let second = StoredNote {
+            header: test_note_header(),
+            details: vec![2],
+            created_at: Utc::now(),
+            seq: 0,
+        };
+        db.store_note(&second).await.unwrap();
+
+        // Fetch everything and assert INSERT order = read order = seq ascending.
+        let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        assert_eq!(fetched.len(), 2);
+        assert!(fetched[0].seq < fetched[1].seq, "expected monotonic seq; got {} then {}", fetched[0].seq, fetched[1].seq);
+        assert_eq!(fetched[0].details, vec![1]);
+        assert_eq!(fetched[1].details, vec![2]);
+
+        // Cursor between the two seqs returns only the second.
+        let mid_cursor = fetched[0].seq as u64;
+        let after_first = db.fetch_notes(TAG_LOCAL_ANY.into(), mid_cursor).await.unwrap();
+        assert_eq!(after_first.len(), 1);
+        assert_eq!(after_first[0].details, vec![2]);
+    }
+
+    #[tokio::test]
     async fn test_fetch_notes_seq_cursor_filtering() {
         let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
             .await

@@ -27,5 +27,9 @@ ORDER BY created_at ASC;
 DROP TABLE notes;
 ALTER TABLE notes_new RENAME TO notes;
 
-CREATE INDEX idx_notes_tag ON notes(tag);
+-- Compound (tag, seq) supports the hot pagination query
+--     WHERE tag = ? AND seq > ? ORDER BY seq ASC
+-- so the whole operation is index-only as the table grows.
+CREATE INDEX idx_notes_tag_seq ON notes(tag, seq);
+-- Kept for cleanup_old_notes (DELETE WHERE created_at < ?).
 CREATE INDEX idx_notes_created_at ON notes(created_at);

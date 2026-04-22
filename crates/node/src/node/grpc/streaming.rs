@@ -45,7 +45,10 @@ pub(crate) enum StreamerMessage {
 
 /// Tag data tracking
 pub struct TagData {
-    lts: u64,
+    /// Pagination cursor for this tag — the largest `seq` of notes already
+    /// forwarded to subscribers. Next fetch uses this to query
+    /// `seq > cursor` and pick up only new arrivals.
+    cursor: u64,
     subs: BTreeMap<u64, mpsc::Sender<TransportNotesPg>>,
 }
 
@@ -79,14 +82,16 @@ impl NoteStreamerManager {
 
         let mut updates = vec![];
         for (tag, tag_data) in &self.tags {
-            let snotes = self.database.fetch_notes(*tag, tag_data.lts).await?;
-            let mut cursor = tag_data.lts;
+            let snotes = self.database.fetch_notes(*tag, tag_data.cursor).await?;
+            let mut cursor = tag_data.cursor;
             for snote in &snotes {
-                let lcursor = snote
-                    .created_at
-                    .timestamp_micros()
+                // Advance cursor using the DB-assigned monotonic `seq`
+                // (matches the pull-side fetch_notes contract). Using
+                // `created_at` here is what caused the original race.
+                let lcursor: u64 = snote
+                    .seq
                     .try_into()
-                    .map_err(|_| tonic::Status::internal("Timestamp too large for cursor"))?;
+                    .map_err(|_| tonic::Status::internal("Negative seq in stored note"))?;
                 cursor = cursor.max(lcursor);
             }
 
@@ -129,7 +134,7 @@ impl NoteStreamerManager {
         // Update query cursors, to the cursor of the most recent note
         for (tag, notes) in tag_notes {
             if let Some(tag_data) = self.tags.get_mut(tag) {
-                tag_data.lts = notes.1;
+                tag_data.cursor = notes.1;
             }
         }
     }
@@ -225,7 +230,7 @@ impl Subface {
 
 impl TagData {
     pub fn new() -> Self {
-        Self { lts: 0, subs: BTreeMap::new() }
+        Self { cursor: 0, subs: BTreeMap::new() }
     }
 }
 
