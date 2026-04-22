@@ -29,6 +29,18 @@ use self::streaming::{NoteStreamer, StreamerMessage, Sub, Subface};
 use crate::database::Database;
 use crate::metrics::MetricsGrpc;
 
+/// Upper bound on the number of tags a client may include in a single
+/// `fetch_notes` request. Guards against two concerns:
+///   - Server CPU: deduplicating `request_data.tags` via `BTreeSet` is `O(n log n)`; a client
+///     sending millions of tags can burn a worker.
+///   - SQLite `IN (...)`: the underlying driver caps bound variables at
+///     `SQLITE_MAX_VARIABLE_NUMBER` (32766 on recent builds, lower on older); blow that and the
+///     query errors. Well below the SQLite cap so we have headroom for future query-plan changes.
+///
+/// A realistic wallet tracks O(10) to O(100) tags; 128 is generous without
+/// being an attack surface.
+const MAX_TAGS_PER_FETCH_REQUEST: usize = 128;
+
 /// Miden Note Transport gRPC server
 pub struct GrpcServer {
     database: Arc<Database>,
@@ -167,6 +179,20 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         let timer = self.metrics.grpc_fetch_notes_request();
 
         let request_data = request.into_inner();
+
+        // Reject requests with too many tags BEFORE any allocation /
+        // deduplication work. A client sending `[0u32; 1_000_000]` would
+        // otherwise force an O(n log n) BTreeSet build and then either blow
+        // through `SQLITE_MAX_VARIABLE_NUMBER` or return a pathologically
+        // expensive query plan.
+        if request_data.tags.len() > MAX_TAGS_PER_FETCH_REQUEST {
+            return Err(Status::invalid_argument(format!(
+                "Too many tags in fetch_notes request: {} (max {})",
+                request_data.tags.len(),
+                MAX_TAGS_PER_FETCH_REQUEST
+            )));
+        }
+
         // Deduplicate incoming tags — the DB query is more efficient without repeats
         // and the previous per-tag loop happened to dedupe via BTreeSet.
         let tag_set: BTreeSet<_> = request_data.tags.into_iter().collect();
@@ -250,5 +276,62 @@ impl Drop for StreamerCtx {
             tracing::error!("Streamer shutdown message sending failure: {e}");
             self.handle.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use miden_note_transport_proto::miden_note_transport::FetchNotesRequest;
+    use miden_note_transport_proto::miden_note_transport::miden_note_transport_server::MidenNoteTransport;
+
+    use super::*;
+    use crate::database::{Database, DatabaseConfig};
+    use crate::metrics::Metrics;
+
+    async fn test_server() -> GrpcServer {
+        let metrics = Metrics::default();
+        let db = Arc::new(
+            Database::connect(DatabaseConfig::default(), metrics.db.clone()).await.unwrap(),
+        );
+        GrpcServer::new(db, GrpcServerConfig::default(), metrics.grpc)
+    }
+
+    /// A client sending more tags than `MAX_TAGS_PER_FETCH_REQUEST` is rejected
+    /// with `InvalidArgument` BEFORE any `BTreeSet` or DB work. Guards against
+    /// both the O(n log n) dedup cost and the `SQLITE_MAX_VARIABLE_NUMBER`
+    /// ceiling.
+    #[tokio::test]
+    async fn test_fetch_notes_rejects_too_many_tags() {
+        let server = test_server().await;
+
+        let tags = vec![0u32; MAX_TAGS_PER_FETCH_REQUEST + 1];
+        let request = tonic::Request::new(FetchNotesRequest { tags, cursor: 0 });
+        let result = server.fetch_notes(request).await;
+
+        let status = result.expect_err("expected InvalidArgument");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(
+            status.message().contains("Too many tags"),
+            "unexpected error message: {}",
+            status.message()
+        );
+    }
+
+    /// A client sending exactly `MAX_TAGS_PER_FETCH_REQUEST` tags is accepted.
+    /// (Using the same tag value many times is fine — the handler dedups via
+    /// `BTreeSet` before issuing the query.)
+    #[tokio::test]
+    async fn test_fetch_notes_accepts_max_tags_at_limit() {
+        let server = test_server().await;
+
+        let tags = vec![0u32; MAX_TAGS_PER_FETCH_REQUEST];
+        let request = tonic::Request::new(FetchNotesRequest { tags, cursor: 0 });
+        let result = server.fetch_notes(request).await;
+
+        let response = result.expect("request at the cap must succeed").into_inner();
+        assert_eq!(response.notes.len(), 0, "DB is empty, no notes returned");
+        assert_eq!(response.cursor, 0);
     }
 }

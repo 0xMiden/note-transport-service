@@ -149,8 +149,14 @@ impl DatabaseBackend for SqliteDatabase {
 
         // Legacy cursor detection: clients upgraded from the pre-`seq` schema
         // carry microsecond-timestamp cursors; interpret those as 0 so they
-        // don't stall forever waiting for `seq` to catch up.
-        let effective_cursor = if cursor > LEGACY_CURSOR_THRESHOLD { 0 } else { cursor };
+        // don't stall forever waiting for `seq` to catch up. Record a metric
+        // so operators can see when pre-migration clients are being reset.
+        let effective_cursor = if cursor > LEGACY_CURSOR_THRESHOLD {
+            self.metrics.db_fetch_notes_legacy_cursor_reset();
+            0
+        } else {
+            cursor
+        };
 
         let cursor_i64: i64 = effective_cursor.try_into().map_err(|_| {
             DatabaseError::QueryExecution("Cursor too large for SQLite".to_string())
