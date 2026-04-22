@@ -87,7 +87,7 @@ Follow the exact style from CHANGELOG.md:
 Example:
 ```
 CHANGELOG: ### Changes
-- Added `AssetAmount` wrapper type for validated fungible asset amounts ([#2721](https://github.com/0xMiden/note-transport-service/pull/2721)).
+- fix: close private-note pagination race and :memory: pool-isolation bug ([#77](https://github.com/0xMiden/note-transport-service/pull/77)).
 ```
 
 ## Rules
