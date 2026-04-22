@@ -53,7 +53,7 @@ if [[ "$VERDICT" == CHANGELOG:* ]]; then
   # Escape for JSON
   ENTRY_ESCAPED=$(echo "$ENTRY" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read())[1:-1])')
   cat <<ENDJSON
-{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"Changelog entry needed for PR #${PR_NUMBER}. Add the following to CHANGELOG.md under the current unreleased version (v0.15.0 TBD), then commit and push:\n\n${ENTRY_ESCAPED}"}}
+{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"Changelog entry needed for PR #${PR_NUMBER}. Add the following to CHANGELOG.md under the current unreleased version (v0.5.0 TBD), then commit and push:\n\n${ENTRY_ESCAPED}"}}
 ENDJSON
   exit 2
 fi

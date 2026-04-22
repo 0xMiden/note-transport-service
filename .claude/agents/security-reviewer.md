@@ -97,7 +97,7 @@ After both personas report:
 [2-3 sentences: overall risk profile and the single most important thing to fix]
 ```
 
-**All findings (Critical, Warning, and Note) block the merge.** Every issue must be addressed before pushing.
+**All critical or warning findings block the merge.** Every issue must be addressed before pushing.
 
 **Verdicts:**
 - **BLOCK** - Any findings at any severity level. Do not merge until addressed.
@@ -121,4 +121,4 @@ You may share the same mental model as the code's author. To break this:
 5. Ask: "If I deleted this change entirely, what would break?" If nothing, the change might be unnecessary.
 
 If you find any findings at any severity level, start your final response with `BLOCK:` followed by the review.
-If there are zero findings, start with `CLEAN:` followed by the review.
+If there are zero critical or important findings, start with `CLEAN:` followed by the review.
