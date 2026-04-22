@@ -13,6 +13,24 @@ mod schema;
 use connection_manager::ConnectionManager;
 use models::{NewNote, Note};
 
+/// Maximum number of notes returned in a single `fetch_notes` / `fetch_notes_by_tags`
+/// response. Bounds memory on both the server (one DB buffer) and the client (one
+/// deserialized batch) regardless of how far behind the client's cursor is. A
+/// backlogged client paginates naturally by re-calling with the returned cursor.
+pub(crate) const FETCH_NOTES_BATCH_SIZE: i64 = 500;
+
+/// Threshold above which a `fetch_notes` cursor is interpreted as a legacy
+/// microsecond-timestamp cursor from the pre-`seq` schema and reset to 0.
+///
+/// Before the `seq`-cursor migration, cursors were `created_at.timestamp_micros()`
+/// — values near 1.7×10^15. After migration, cursors are `seq` values starting
+/// at 1. Without this reset, any client that stored a cursor before migration
+/// would see zero notes forever (until `seq` caught up to their old timestamp,
+/// which at realistic insert rates is decades). 10^12 is two orders of magnitude
+/// above any plausible `seq` value we'd reach in the lifetime of this deployment,
+/// and two orders of magnitude below any microsecond timestamp this decade.
+const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
+
 /// `SQLite` implementation of the database backend
 pub struct SqliteDatabase {
     pool: deadpool_diesel::Pool<ConnectionManager, deadpool::managed::Object<ConnectionManager>>,
@@ -129,7 +147,12 @@ impl DatabaseBackend for SqliteDatabase {
     ) -> Result<Vec<StoredNote>, DatabaseError> {
         let timer = self.metrics.db_fetch_notes();
 
-        let cursor_i64: i64 = cursor.try_into().map_err(|_| {
+        // Legacy cursor detection: clients upgraded from the pre-`seq` schema
+        // carry microsecond-timestamp cursors; interpret those as 0 so they
+        // don't stall forever waiting for `seq` to catch up.
+        let effective_cursor = if cursor > LEGACY_CURSOR_THRESHOLD { 0 } else { cursor };
+
+        let cursor_i64: i64 = effective_cursor.try_into().map_err(|_| {
             DatabaseError::QueryExecution("Cursor too large for SQLite".to_string())
         })?;
 
@@ -144,6 +167,9 @@ impl DatabaseBackend for SqliteDatabase {
         // INSERT can't land between per-tag queries and get leapfrogged by the
         // cursor advance. This closes the second half of the pagination race
         // (the monotonic `seq` column closed the timestamp-collision half).
+        //
+        // LIMIT caps response size; a backlogged client paginates by re-calling
+        // with the returned cursor until the response is smaller than the limit.
         let notes: Vec<Note> = self
             .transact("fetch notes by tags", move |conn| {
                 use schema::notes::dsl::{notes, seq, tag};
@@ -151,6 +177,7 @@ impl DatabaseBackend for SqliteDatabase {
                     .filter(tag.eq_any(&tag_values))
                     .filter(seq.gt(cursor_i64))
                     .order(seq.asc())
+                    .limit(FETCH_NOTES_BATCH_SIZE)
                     .load::<Note>(conn)?;
                 Ok(fetched_notes)
             })

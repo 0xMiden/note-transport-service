@@ -432,4 +432,87 @@ mod tests {
             "the interleaved tag-A insert MUST be visible via the single-snapshot query"
         );
     }
+
+    /// Legacy cursor reset: a client carrying a pre-migration microsecond-
+    /// timestamp cursor (e.g. 1.7×10^15) would otherwise see 0 notes until
+    /// `seq` reached that magnitude, which at realistic rates is decades.
+    /// Cursors above `LEGACY_CURSOR_THRESHOLD` are treated as 0.
+    #[tokio::test]
+    async fn test_fetch_notes_resets_legacy_cursor() {
+        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
+            .await
+            .unwrap();
+
+        let note = StoredNote {
+            header: test_note_header(),
+            details: vec![1, 2, 3, 4],
+            created_at: Utc::now(),
+            seq: 0,
+        };
+        db.store_note(&note).await.unwrap();
+
+        // A realistic "legacy" cursor — microseconds since the epoch, currently
+        // ~1.76×10^15. Well above the 10^12 threshold.
+        let legacy_cursor: u64 = 1_760_000_000_000_000;
+        let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), legacy_cursor).await.unwrap();
+        assert_eq!(
+            fetched.len(),
+            1,
+            "legacy microsecond cursor should be reset to 0, returning the note"
+        );
+
+        // Sanity check: a non-legacy cursor above the note's seq should NOT trigger the reset.
+        let normal_cursor: u64 = 1_000;
+        let empty = db.fetch_notes(TAG_LOCAL_ANY.into(), normal_cursor).await.unwrap();
+        assert_eq!(empty.len(), 0, "normal cursor > seq should filter correctly");
+    }
+
+    /// Pagination: a response is capped at `FETCH_NOTES_BATCH_SIZE` rows. A
+    /// backlogged client sees a bounded batch on each call and advances the
+    /// cursor to pick up the rest on the next call.
+    #[tokio::test]
+    async fn test_fetch_notes_paginates_at_batch_limit() {
+        use crate::database::sqlite::FETCH_NOTES_BATCH_SIZE;
+
+        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
+            .await
+            .unwrap();
+
+        // Insert BATCH_SIZE + extra notes for the same tag.
+        let extra: usize = 7;
+        let total = usize::try_from(FETCH_NOTES_BATCH_SIZE).unwrap() + extra;
+        for i in 0..total {
+            db.store_note(&StoredNote {
+                header: test_note_header(),
+                details: vec![(i % 256) as u8],
+                created_at: Utc::now(),
+                seq: 0,
+            })
+            .await
+            .unwrap();
+        }
+
+        // First fetch from cursor=0 returns exactly BATCH_SIZE rows.
+        let first = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        assert_eq!(
+            i64::try_from(first.len()).unwrap(),
+            FETCH_NOTES_BATCH_SIZE,
+            "first batch must be capped at FETCH_NOTES_BATCH_SIZE"
+        );
+
+        // Advance cursor to max(seq) and refetch — remaining rows come back.
+        let advanced: u64 = first.iter().map(|n| u64::try_from(n.seq).unwrap()).max().unwrap();
+        let second = db.fetch_notes(TAG_LOCAL_ANY.into(), advanced).await.unwrap();
+        assert_eq!(second.len(), extra, "second batch must contain the remaining {extra} rows");
+
+        // Third fetch drains nothing (nothing left).
+        let third_cursor: u64 =
+            second.iter().map(|n| u64::try_from(n.seq).unwrap()).max().unwrap_or(advanced);
+        let third = db.fetch_notes(TAG_LOCAL_ANY.into(), third_cursor).await.unwrap();
+        assert_eq!(third.len(), 0, "drained");
+
+        // Stats reflect every row written.
+        let (total_stats, _) = db.get_stats().await.unwrap();
+        assert_eq!(usize::try_from(total_stats).unwrap(), total);
+    }
 }
