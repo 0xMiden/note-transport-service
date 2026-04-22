@@ -3,7 +3,6 @@
 # against settings.json filter regressions.
 COMMAND=$(jq -r '.tool_input.command // empty' 2>/dev/null)
 echo "$COMMAND" | grep -qE '(^|[[:space:]])git[[:space:]]+(-c[[:space:]]+[^ ]+[[:space:]]+)*commit([[:space:]]|$)' || exit 0
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 
 # Pre-commit hook: runs `make lint` in Rust repositories before allowing git commit.
 # Exit 0 = allow, Exit 2 = block (reason on stderr).

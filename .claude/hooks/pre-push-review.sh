@@ -3,7 +3,6 @@
 # against settings.json filter regressions.
 COMMAND=$(jq -r '.tool_input.command // empty' 2>/dev/null)
 echo "$COMMAND" | grep -qE '(^|[[:space:]])git[[:space:]]+(-c[[:space:]]+[^ ]+[[:space:]]+)*push([[:space:]]|$)' || exit 0
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 # Pre-push hook: runs tests, then spawns code-reviewer + security-reviewer in
 # parallel. Blocks the push on (a) test failure, (b) any Critical/Important/
 # Warning finding from either reviewer, or (c) reviewer crash or malformed
@@ -153,7 +152,12 @@ evaluate_reviewer() {
     if [ "$rc" -ne 0 ]; then
     echo "${name}: agent exited with status ${rc}; treating as block." >&2
     [ -s "$out" ] && cat "$out" >&2
-    [ -s "${TMPDIR}/${name_lower}.err" ] && { echo "--- agent stderr ---" >&2; cat "${TMPDIR}/${name_lower}.err" >&2; }
+    local err_file=""
+    case "$name" in
+        "CODE REVIEWER")     err_file="$TMPDIR/code.err" ;;
+        "SECURITY REVIEWER") err_file="$TMPDIR/sec.err" ;;
+    esac
+    [ -n "$err_file" ] && [ -s "$err_file" ] && { echo "--- agent stderr ---" >&2; cat "$err_file" >&2; }
     return 1
     fi
 
