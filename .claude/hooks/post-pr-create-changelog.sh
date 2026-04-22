@@ -1,11 +1,8 @@
 #!/bin/bash
-echo "$(date +%H:%M:%S) [post-pr-changelog] fired" >> /tmp/claude-hooks.log
-
 # Internal guard: only fire for actual git commit invocations. Defense in depth
 # against settings.json filter regressions.
 COMMAND=$(jq -r '.tool_input.command // empty' 2>/dev/null)
-echo "$COMMAND" | grep -qE '(^|[[:space:]])git[[:space:]]+(-c[[:space:]]+[^ ]+[[:space:]]+)*commit([[:space:]]|$)' || exit 0
-
+echo "$COMMAND" | grep -qE '(^|[^a-zA-Z0-9_-])gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$)' || exit 0
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 
 # Post-PR-create hook: spawns a changelog-manager agent to classify the PR diff
@@ -65,9 +62,9 @@ PROMPT="Check changelog for PR #${PR_NUMBER} (${PR_URL}). Important: if the diff
 ALLOWED_TOOLS="Bash(git:*) Bash(gh:*) Read Grep Glob"
 
 RESULT_FILE=$(mktemp)
-trap 'rm -f "$RESULT_FILE"' EXIT
+trap 'rm -f "$RESULT_FILE" "$RESULT_FILE.err"' EXIT
 
-cd "$CWD" && claude --agent changelog-manager --allowedTools "$ALLOWED_TOOLS" -p "$PROMPT" > "$RESULT_FILE" 2>/dev/null
+cd "$CWD" && claude --agent changelog-manager --allowedTools "$ALLOWED_TOOLS" -p "$PROMPT" > "$RESULT_FILE" 2> "$RESULT_FILE.err"
 
 VERDICT=$(grep -m1 -E '^(SKIP:|NO_CHANGELOG:|CHANGELOG:)' "$RESULT_FILE" || true)
 
@@ -105,5 +102,25 @@ ${ENTRY}"
   exit 2
 fi
 
-# No verdict found - fail open, CI will catch it
-exit 0
+# No verdict line found. This usually means the classifier agent crashed,
+# timed out, or returned output in an unexpected format. Surface the failure
+# to the main agent instead of silently exiting so the changelog decision
+# isn't skipped without a human knowing.
+WARNING="WARNING: changelog-manager produced no verdict for PR #${PR_NUMBER}. Decide manually: add a CHANGELOG.md entry under the appropriate unreleased section, or apply the 'no changelog' label via: gh pr edit ${PR_NUMBER} --add-label 'no changelog'"
+
+if [ -s "$RESULT_FILE.err" ]; then
+  WARNING="${WARNING}
+
+--- classifier stderr ---
+$(cat "$RESULT_FILE.err")"
+fi
+
+if [ -s "$RESULT_FILE" ]; then
+  WARNING="${WARNING}
+
+--- classifier stdout (no verdict line recognized) ---
+$(cat "$RESULT_FILE")"
+fi
+
+emit_context "$WARNING"
+exit 2

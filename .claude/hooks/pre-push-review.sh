@@ -1,11 +1,8 @@
 #!/bin/bash
-echo "$(date +%H:%M:%S) [pre-push-review] fired" >> /tmp/claude-hooks.log
-
 # Internal guard: only fire for actual git commit invocations. Defense in depth
 # against settings.json filter regressions.
 COMMAND=$(jq -r '.tool_input.command // empty' 2>/dev/null)
-echo "$COMMAND" | grep -qE '(^|[[:space:]])git[[:space:]]+(-c[[:space:]]+[^ ]+[[:space:]]+)*commit([[:space:]]|$)' || exit 0
-
+echo "$COMMAND" | grep -qE '(^|[[:space:]])git[[:space:]]+(-c[[:space:]]+[^ ]+[[:space:]]+)*push([[:space:]]|$)' || exit 0
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 # Pre-push hook: runs tests, then spawns code-reviewer + security-reviewer in
 # parallel. Blocks the push on (a) test failure, (b) any Critical/Important/
