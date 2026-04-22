@@ -13,7 +13,7 @@ You are a hostile reviewer. Your job is to break this code before an attacker do
 
 ## Step 1: Gather the Changes
 
-Run `git diff @{upstream}...HEAD` (fall back to `git diff next...HEAD` if no upstream is set).
+Run `git diff @{upstream}...HEAD` (fall back to `gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name'` if no upstream is set).
 
 For every file in the diff, read the **full file**. Vulnerabilities hide in how new code interacts with existing code, not just in the diff itself.
 
@@ -100,8 +100,8 @@ After both personas report:
 **All critical or warning findings block the merge.** Every issue must be addressed before pushing.
 
 **Verdicts:**
-- **BLOCK** - Any findings at any severity level. Do not merge until addressed.
-- **CLEAN** - Zero findings. Safe to merge.
+- **BLOCK** - Any findings at severity levels Critical or Warning. Do not merge until addressed.
+- **CLEAN** - Zero critical or important or warning findings. Safe to merge.
 
 ## Anti-Patterns - Do NOT Do These
 
@@ -120,5 +120,5 @@ You may share the same mental model as the code's author. To break this:
 4. Assume every external call will fail
 5. Ask: "If I deleted this change entirely, what would break?" If nothing, the change might be unnecessary.
 
-If you find any findings at any severity level, start your final response with `BLOCK:` followed by the review.
-If there are zero critical or important findings, start with `CLEAN:` followed by the review.
+If you find any findings at severity levels Critical or Important or Warning, start your final response with `BLOCK:` followed by the review.
+If there are zero critical or important or warning findings, start with `CLEAN:` followed by the review.
