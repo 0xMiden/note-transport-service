@@ -109,7 +109,7 @@ mod tests {
 
     use super::*;
     use crate::metrics::Metrics;
-    use crate::test_utils::{TAG_LOCAL_ANY, test_note_header};
+    use crate::test_utils::{TAG_LOCAL_ANY, test_note_header, test_note_header_with_tag};
 
     #[tokio::test]
     async fn test_sqlite_database() {
@@ -175,6 +175,53 @@ mod tests {
         let after_first = db.fetch_notes(TAG_LOCAL_ANY.into(), mid_cursor).await.unwrap();
         assert_eq!(after_first.len(), 1);
         assert_eq!(after_first[0].details, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_store_fetch_sees_all_rows() {
+        // Regression test for the `:memory:` pool-isolation bug: when the pool
+        // had max_size>1 and the URL was `:memory:`, writes and reads could
+        // land on different connections and each connection had its own
+        // isolated in-memory DB. Result: writes silently split across pool
+        // connections, fetches only saw a fraction of the actual data.
+        //
+        // With the pool clamped to size=1 for `:memory:`, all ops go to the
+        // same connection and see the same DB.
+        use std::sync::Arc;
+        use tokio::task::JoinSet;
+
+        const TAG_A: u32 = 0x3d9c_0000;
+        const TAG_B: u32 = 0x47ac_0000;
+
+        let db = Arc::new(
+            Database::connect(DatabaseConfig::default(), Metrics::default().db).await.unwrap(),
+        );
+
+        // Spawn many concurrent writers — more than the old max_size=16 — so
+        // that the bug would have fragmented writes across connections.
+        let mut writers = JoinSet::new();
+        for i in 0..40u32 {
+            let db = db.clone();
+            writers.spawn(async move {
+                let tag = if i % 2 == 0 { TAG_A } else { TAG_B };
+                db.store_note(&StoredNote {
+                    header: test_note_header_with_tag(tag),
+                    details: vec![i as u8],
+                    created_at: Utc::now(),
+                    seq: 0,
+                })
+                .await
+                .unwrap();
+            });
+        }
+        while writers.join_next().await.is_some() {}
+
+        let fetched_a = db.fetch_notes(TAG_A.into(), 0).await.unwrap();
+        let fetched_b = db.fetch_notes(TAG_B.into(), 0).await.unwrap();
+        assert_eq!(fetched_a.len() + fetched_b.len(), 40, "all 40 concurrent writes should be visible");
+
+        let (total, _) = db.get_stats().await.unwrap();
+        assert_eq!(total, 40, "stats should reflect all 40 rows");
     }
 
     #[tokio::test]

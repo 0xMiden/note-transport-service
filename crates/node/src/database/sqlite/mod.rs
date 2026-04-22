@@ -71,9 +71,26 @@ impl DatabaseBackend for SqliteDatabase {
             })?;
         }
 
+        // SQLite `:memory:` DBs are per-connection-isolated — two connections
+        // pointing at `:memory:` see two different databases. With a pool of N
+        // connections, writes splinter across N isolated DBs and most reads
+        // return a partial view, which silently loses note data under load.
+        //
+        // Two ways to fix for an in-memory DB:
+        //   1. `file::memory:?cache=shared` — SQLite URI syntax that makes all
+        //      connections share the SAME in-memory DB via shared cache.
+        //   2. Pool with `max_size=1` so only one connection exists.
+        //
+        // We pick #2 for simplicity and portability (URI mode requires the
+        // `SQLITE_OPEN_URI` flag to be set on connection open, which is not the
+        // driver default). For file-backed URLs, a large pool is appropriate
+        // since all connections open the same file.
+        let is_in_memory = config.url == ":memory:" || config.url.starts_with("file::memory:");
+        let max_size = if is_in_memory { 1 } else { 16 };
+
         let manager = ConnectionManager::new(&config.url);
         let pool = deadpool_diesel::Pool::builder(manager)
-            .max_size(16)
+            .max_size(max_size)
             .build()
             .map_err(|e| DatabaseError::Pool(format!("Failed to create connection pool: {e}")))?;
 
