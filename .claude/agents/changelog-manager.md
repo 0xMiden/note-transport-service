@@ -86,8 +86,8 @@ Follow the exact style from CHANGELOG.md:
 
 Example:
 ```
-CHANGELOG: ### Changes
-- fix: close private-note pagination race and :memory: pool-isolation bug ([#77](https://github.com/0xMiden/note-transport-service/pull/77)).
+CHANGELOG: ### Fixes
+- Fixed `fetch_notes` pagination race and `:memory:` pool isolation bug ([#77](https://github.com/0xMiden/note-transport-service/pull/77)).
 ```
 
 ## Rules
