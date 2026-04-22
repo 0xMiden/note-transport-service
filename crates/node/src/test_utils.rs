@@ -29,10 +29,15 @@ pub const TAG_LOCAL_ANY: u32 = 0xc000_0000;
 
 /// Generate a private [`NoteHeader`] with random sender
 pub fn test_note_header() -> NoteHeader {
+    test_note_header_with_tag(TAG_LOCAL_ANY)
+}
+
+/// Generate a private [`NoteHeader`] with random sender and a specified tag
+pub fn test_note_header_with_tag(tag_value: u32) -> NoteHeader {
     let id = random_note_id();
     let sender = AccountId::try_from(ACCOUNT_ID_MAX_ZEROES).unwrap();
     let note_type = NoteType::Private;
-    let tag = NoteTag::new(TAG_LOCAL_ANY);
+    let tag = NoteTag::new(tag_value);
 
     let metadata = NoteMetadata::new(sender, note_type).with_tag(tag);
 

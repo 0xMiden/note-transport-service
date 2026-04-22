@@ -13,6 +13,24 @@ mod schema;
 use connection_manager::ConnectionManager;
 use models::{NewNote, Note};
 
+/// Maximum number of notes returned in a single `fetch_notes` / `fetch_notes_by_tags`
+/// response. Bounds memory on both the server (one DB buffer) and the client (one
+/// deserialized batch) regardless of how far behind the client's cursor is. A
+/// backlogged client paginates naturally by re-calling with the returned cursor.
+pub(crate) const FETCH_NOTES_BATCH_SIZE: i64 = 500;
+
+/// Threshold above which a `fetch_notes` cursor is interpreted as a legacy
+/// microsecond-timestamp cursor from the pre-`seq` schema and reset to 0.
+///
+/// Before the `seq`-cursor migration, cursors were `created_at.timestamp_micros()`
+/// — values near 1.7×10^15. After migration, cursors are `seq` values starting
+/// at 1. Without this reset, any client that stored a cursor before migration
+/// would see zero notes forever (until `seq` caught up to their old timestamp,
+/// which at realistic insert rates is decades). 10^12 is two orders of magnitude
+/// above any plausible `seq` value we'd reach in the lifetime of this deployment,
+/// and two orders of magnitude below any microsecond timestamp this decade.
+const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
+
 /// `SQLite` implementation of the database backend
 pub struct SqliteDatabase {
     pool: deadpool_diesel::Pool<ConnectionManager, deadpool::managed::Object<ConnectionManager>>,
@@ -71,9 +89,26 @@ impl DatabaseBackend for SqliteDatabase {
             })?;
         }
 
+        // SQLite `:memory:` DBs are per-connection-isolated — two connections
+        // pointing at `:memory:` see two different databases. With a pool of N
+        // connections, writes splinter across N isolated DBs and most reads
+        // return a partial view, which silently loses note data under load.
+        //
+        // Two ways to fix for an in-memory DB:
+        //   1. `file::memory:?cache=shared` — SQLite URI syntax that makes all connections share
+        //      the SAME in-memory DB via shared cache.
+        //   2. Pool with `max_size=1` so only one connection exists.
+        //
+        // We pick #2 for simplicity and portability (URI mode requires the
+        // `SQLITE_OPEN_URI` flag to be set on connection open, which is not the
+        // driver default). For file-backed URLs, a large pool is appropriate
+        // since all connections open the same file.
+        let is_in_memory = config.url == ":memory:" || config.url.starts_with("file::memory:");
+        let max_size = if is_in_memory { 1 } else { 16 };
+
         let manager = ConnectionManager::new(&config.url);
         let pool = deadpool_diesel::Pool::builder(manager)
-            .max_size(16)
+            .max_size(max_size)
             .build()
             .map_err(|e| DatabaseError::Pool(format!("Failed to create connection pool: {e}")))?;
 
@@ -101,20 +136,54 @@ impl DatabaseBackend for SqliteDatabase {
         tag: NoteTag,
         cursor: u64,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
+        self.fetch_notes_by_tags(&[tag], cursor).await
+    }
+
+    #[tracing::instrument(skip(self, tags), fields(operation = "db.fetch_notes_by_tags"))]
+    async fn fetch_notes_by_tags(
+        &self,
+        tags: &[NoteTag],
+        cursor: u64,
+    ) -> Result<Vec<StoredNote>, DatabaseError> {
         let timer = self.metrics.db_fetch_notes();
 
-        let cursor_i64: i64 = cursor.try_into().map_err(|_| {
+        // Legacy cursor detection: clients upgraded from the pre-`seq` schema
+        // carry microsecond-timestamp cursors; interpret those as 0 so they
+        // don't stall forever waiting for `seq` to catch up. Record a metric
+        // so operators can see when pre-migration clients are being reset.
+        let effective_cursor = if cursor > LEGACY_CURSOR_THRESHOLD {
+            self.metrics.db_fetch_notes_legacy_cursor_reset();
+            0
+        } else {
+            cursor
+        };
+
+        let cursor_i64: i64 = effective_cursor.try_into().map_err(|_| {
             DatabaseError::QueryExecution("Cursor too large for SQLite".to_string())
         })?;
 
-        let tag_value = i64::from(tag.as_u32());
+        if tags.is_empty() {
+            timer.finish("ok");
+            return Ok(Vec::new());
+        }
+
+        let tag_values: Vec<i64> = tags.iter().map(|t| i64::from(t.as_u32())).collect();
+
+        // Single query for all tags runs in ONE DB snapshot, so a concurrent
+        // INSERT can't land between per-tag queries and get leapfrogged by the
+        // cursor advance. This closes the second half of the pagination race
+        // (the monotonic `seq` column closed the timestamp-collision half).
+        //
+        // LIMIT caps response size; a backlogged client paginates by re-calling
+        // with the returned cursor until the response is smaller than the limit.
         let notes: Vec<Note> = self
-            .transact("fetch notes", move |conn| {
-                use schema::notes::dsl::{created_at, notes, tag};
+            .transact("fetch notes by tags", move |conn| {
+                use schema::notes::dsl::{notes, seq, tag};
                 let fetched_notes = notes
-                    .filter(tag.eq(tag_value))
-                    .filter(created_at.gt(cursor_i64))
-                    .order(created_at.asc())
+                    .filter(tag.eq_any(&tag_values))
+                    .filter(seq.gt(cursor_i64))
+                    .order(seq.asc())
+                    .limit(FETCH_NOTES_BATCH_SIZE)
                     .load::<Note>(conn)?;
                 Ok(fetched_notes)
             })

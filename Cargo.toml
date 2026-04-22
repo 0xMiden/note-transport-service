@@ -11,13 +11,13 @@ license      = "MIT"
 readme       = "README.md"
 repository   = "https://github.com/0xMiden/miden-note-transport"
 rust-version = "1.87"
-version      = "0.3.1"
+version      = "0.3.2"
 
 [workspace.dependencies]
 # Workspace crates (path-based dependencies)
-miden-note-transport-node        = { path = "crates/node", version = "0.3.1" }
-miden-note-transport-proto       = { path = "crates/proto", version = "0.3.1" }
-miden-note-transport-proto-build = { path = "proto", version = "0.3.1" }
+miden-note-transport-node        = { path = "crates/node", version = "0.3.2" }
+miden-note-transport-proto       = { path = "crates/proto", version = "0.3.2" }
+miden-note-transport-proto-build = { path = "proto", version = "0.3.2" }
 
 # miden-base aka protocol dependencies (git = "https://github.com/0xMiden/miden-base"). These should be updated in sync.
 miden-protocol = { default-features = false, version = "0.14.0" }

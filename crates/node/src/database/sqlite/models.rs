@@ -9,6 +9,7 @@ use crate::types::{NoteHeader, StoredNote};
 #[derive(Queryable, Selectable, Debug, Clone)]
 #[diesel(table_name = notes)]
 pub struct Note {
+    pub seq: i64,
     pub id: Vec<u8>,
     pub tag: i64,
     pub header: Vec<u8>,
@@ -16,6 +17,9 @@ pub struct Note {
     pub created_at: i64,
 }
 
+// `seq` is omitted from `NewNote`: SQLite auto-assigns it on INSERT via
+// INTEGER PRIMARY KEY AUTOINCREMENT, and we want INSERT-commit order (not
+// anything caller-provided) to define read order.
 #[derive(Insertable)]
 #[diesel(table_name = notes)]
 pub struct NewNote {
@@ -57,6 +61,7 @@ impl TryFrom<Note> for StoredNote {
             header,
             details: note.details,
             created_at,
+            seq: note.seq,
         })
     }
 }

@@ -25,6 +25,12 @@ pub struct StoredNote {
     pub details: Vec<u8>,
     /// Reference timestamp
     pub created_at: DateTime<Utc>,
+    /// Monotonic sequence number assigned by the database at INSERT commit.
+    ///
+    /// This is the canonical cursor value used by `fetch_notes` pagination.
+    /// Untouched when constructing a `StoredNote` for insertion — the DB
+    /// assigns the real value via `INTEGER PRIMARY KEY AUTOINCREMENT`.
+    pub seq: i64,
 }
 
 impl From<StoredNote> for TransportNote {

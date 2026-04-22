@@ -37,6 +37,8 @@ pub struct MetricsDatabase {
     // fetch_notes()
     fetch_notes_count: Counter<u64>,
     fetch_notes_duration: Histogram<f64>,
+    // legacy cursor reset (pre-seq-migration clients)
+    fetch_notes_legacy_cursor_reset_count: Counter<u64>,
     // Maintenance
     maintenance_cleanup_notes_count: Counter<u64>,
     maintenance_cleanup_notes_duration: Histogram<f64>,
@@ -167,6 +169,15 @@ impl MetricsDatabase {
             .with_unit("s")
             .build();
 
+        let fetch_notes_legacy_cursor_reset_count = meter
+            .u64_counter("db_fetch_notes_legacy_cursor_reset_count")
+            .with_description(
+                "Number of fetch_notes() requests where the client's cursor was \
+                 above the legacy-cursor threshold and reset to 0 (pre-seq-migration \
+                 clients)",
+            )
+            .build();
+
         let maintenance_cleanup_notes_count = meter
             .u64_counter("db_maintenance_cleanup_notes_count")
             .with_description("Total number of DB maintenance cleanup_old_notes() requests")
@@ -183,6 +194,7 @@ impl MetricsDatabase {
             store_note_duration,
             fetch_notes_count,
             fetch_notes_duration,
+            fetch_notes_legacy_cursor_reset_count,
             maintenance_cleanup_notes_count,
             maintenance_cleanup_notes_duration,
         }
@@ -208,6 +220,11 @@ impl MetricsDatabase {
         let histogram = &self.fetch_notes_duration;
 
         request_count_measure(operation, counter, histogram)
+    }
+
+    /// Record a legacy-cursor reset (pre-seq-migration client).
+    pub fn db_fetch_notes_legacy_cursor_reset(&self) {
+        self.fetch_notes_legacy_cursor_reset_count.add(1, &[]);
     }
 
     /// Measure a DB maintenance cleanup-old-notes procedure
