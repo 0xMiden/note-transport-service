@@ -19,8 +19,8 @@ set -uo pipefail
 INPUT=$(cat)
 
 PR_URL=$(printf '%s' "$INPUT" | jq -r '.tool_response // empty' \
-          | grep -oP 'https://github\.com/[^\s"]+/pull/\d+' | head -1)
-PR_NUMBER=$(printf '%s' "$PR_URL" | grep -oP '\d+$')
+          | grep -oE 'https://github\.com/[^\s"]+/pull/[0-9]+' | head -1)
+PR_NUMBER=$(printf '%s' "$PR_URL" | grep -oE '[0-9]+$')
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty')
 
 [ -z "$PR_URL" ] || [ -z "$PR_NUMBER" ] || [ -z "$CWD" ] && exit 0

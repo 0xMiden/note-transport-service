@@ -22,7 +22,7 @@ You receive a prompt like: `Check changelog for PR #N (URL)`
    ```
 2. Check if CHANGELOG.md is already modified in the diff:
    ```
-   gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' -- CHANGELOG.md
+   git diff origin/<default>...HEAD -- CHANGELOG.md
    ```
 
 If either condition is met, output `SKIP: already handled` and stop.
@@ -31,7 +31,7 @@ If either condition is met, output `SKIP: already handled` and stop.
 
 Run:
 ```
-gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' -- ':(exclude)CHANGELOG.md'
+git diff origin/<default>...HEAD -- ':(exclude)CHANGELOG.md''
 ```
 
 ## Step 3: Classify
