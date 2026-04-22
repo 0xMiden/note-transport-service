@@ -1,4 +1,13 @@
 #!/bin/bash
+echo "$(date +%H:%M:%S) [post-pr-changelog] fired" >> /tmp/claude-hooks.log
+
+# Internal guard: only fire for actual git commit invocations. Defense in depth
+# against settings.json filter regressions.
+COMMAND=$(jq -r '.tool_input.command // empty' 2>/dev/null)
+echo "$COMMAND" | grep -qE '(^|[[:space:]])git[[:space:]]+(-c[[:space:]]+[^ ]+[[:space:]]+)*commit([[:space:]]|$)' || exit 0
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+
 # Post-PR-create hook: spawns a changelog-manager agent to classify the PR diff
 # and decide whether a CHANGELOG.md entry or "no changelog" label is needed.
 # Outputs actionable instructions to the main agent via hookSpecificOutput.

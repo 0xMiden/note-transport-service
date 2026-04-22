@@ -1,4 +1,12 @@
 #!/bin/bash
+echo "$(date +%H:%M:%S) [pre-push-review] fired" >> /tmp/claude-hooks.log
+
+# Internal guard: only fire for actual git commit invocations. Defense in depth
+# against settings.json filter regressions.
+COMMAND=$(jq -r '.tool_input.command // empty' 2>/dev/null)
+echo "$COMMAND" | grep -qE '(^|[[:space:]])git[[:space:]]+(-c[[:space:]]+[^ ]+[[:space:]]+)*commit([[:space:]]|$)' || exit 0
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 # Pre-push hook: runs tests, then spawns code-reviewer + security-reviewer in
 # parallel. Blocks the push on (a) test failure, (b) any Critical/Important/
 # Warning finding from either reviewer, or (c) reviewer crash or malformed
@@ -101,9 +109,9 @@ ALLOWED_TOOLS="Bash(git:*) Read Grep Glob"
 
 echo "Pre-push: spawning code-reviewer + security-reviewer..." >&2
 
-claude --agent code-reviewer     --allowedTools "$ALLOWED_TOOLS" -p "$PROMPT" > "$CODE_OUT" 2>/dev/null &
+claude --agent code-reviewer     --allowedTools "$ALLOWED_TOOLS" -p "$PROMPT" > "$CODE_OUT" 2> "$TMPDIR/code.err" &
 PID_CODE=$!
-claude --agent security-reviewer --allowedTools "$ALLOWED_TOOLS" -p "$PROMPT" > "$SEC_OUT"  2>/dev/null &
+claude --agent security-reviewer --allowedTools "$ALLOWED_TOOLS" -p "$PROMPT" > "$SEC_OUT"  2> "$TMPDIR/sec.err"  &
 PID_SEC=$!
 
 wait $PID_CODE; RC_CODE=$?
@@ -145,11 +153,12 @@ evaluate_reviewer() {
   echo "" >&2
   echo "=== ${name} ===" >&2
 
-  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -ne 0 ]; then
     echo "${name}: agent exited with status ${rc}; treating as block." >&2
     [ -s "$out" ] && cat "$out" >&2
+    [ -s "${TMPDIR}/${name_lower}.err" ] && { echo "--- agent stderr ---" >&2; cat "${TMPDIR}/${name_lower}.err" >&2; }
     return 1
-  fi
+    fi
 
   if ! review_is_valid "$out"; then
     echo "${name}: empty or malformed output; treating as block." >&2
