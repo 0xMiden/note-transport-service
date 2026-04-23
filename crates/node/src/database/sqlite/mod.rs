@@ -130,20 +130,26 @@ impl DatabaseBackend for SqliteDatabase {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self), fields(operation = "db.fetch_notes"))]
     async fn fetch_notes(
         &self,
         tag: NoteTag,
         cursor: u64,
+        limit: Option<u32>,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
-        self.fetch_notes_by_tags(&[tag], cursor).await
+        self.fetch_notes_by_tags(&[tag], cursor, limit).await
     }
 
-    #[tracing::instrument(skip(self, tags), fields(operation = "db.fetch_notes_by_tags"))]
+    #[tracing::instrument(skip(self, tags), fields(
+        operation = "db.fetch_notes_by_tags",
+        tag_count = tags.len(),
+        cursor = cursor,
+        notes_returned = tracing::field::Empty,
+    ))]
     async fn fetch_notes_by_tags(
         &self,
         tags: &[NoteTag],
         cursor: u64,
+        limit: Option<u32>,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
         let timer = self.metrics.db_fetch_notes();
 
@@ -169,6 +175,10 @@ impl DatabaseBackend for SqliteDatabase {
 
         let tag_values: Vec<i64> = tags.iter().map(|t| i64::from(t.as_u32())).collect();
 
+        // Client-requested limit, clamped to the server cap.
+        let effective_limit =
+            limit.map_or(FETCH_NOTES_BATCH_SIZE, |l| i64::from(l).min(FETCH_NOTES_BATCH_SIZE));
+
         // Single query for all tags runs in ONE DB snapshot, so a concurrent
         // INSERT can't land between per-tag queries and get leapfrogged by the
         // cursor advance. This closes the second half of the pagination race
@@ -183,7 +193,7 @@ impl DatabaseBackend for SqliteDatabase {
                     .filter(tag.eq_any(&tag_values))
                     .filter(seq.gt(cursor_i64))
                     .order(seq.asc())
-                    .limit(FETCH_NOTES_BATCH_SIZE)
+                    .limit(effective_limit)
                     .load::<Note>(conn)?;
                 Ok(fetched_notes)
             })

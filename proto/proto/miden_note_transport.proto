@@ -26,6 +26,9 @@ message SendNoteResponse { }
 message FetchNotesRequest {
     repeated fixed32 tags = 1;
     fixed64 cursor = 2;
+    // Maximum number of notes to return. When unset the server applies its
+    // own batch cap (currently 500). Values above the server cap are clamped.
+    optional uint32 limit = 3;
 }
 
 // API response for fetching notes
