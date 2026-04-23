@@ -26,6 +26,10 @@ pub struct FetchNotesRequest {
     pub tags: ::prost::alloc::vec::Vec<u32>,
     #[prost(fixed64, tag = "2")]
     pub cursor: u64,
+    /// Maximum number of notes to return. When unset the server applies its
+    /// own batch cap (currently 500). Values above the server cap are clamped.
+    #[prost(uint32, optional, tag = "3")]
+    pub limit: ::core::option::Option<u32>,
 }
 /// API response for fetching notes
 #[derive(Clone, PartialEq, ::prost::Message)]
