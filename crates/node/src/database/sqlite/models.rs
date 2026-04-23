@@ -8,6 +8,7 @@ use crate::types::{NoteHeader, StoredNote};
 
 #[derive(Queryable, Selectable, Debug, Clone)]
 #[diesel(table_name = notes)]
+#[allow(clippy::struct_field_names)]
 pub struct Note {
     pub seq: i64,
     pub id: Vec<u8>,
@@ -15,6 +16,8 @@ pub struct Note {
     pub header: Vec<u8>,
     pub details: Vec<u8>,
     pub created_at: i64,
+    pub commitment_block_num: Option<i32>,
+    pub note_metadata: Option<Vec<u8>>,
 }
 
 // `seq` is omitted from `NewNote`: SQLite auto-assigns it on INSERT via
@@ -28,6 +31,8 @@ pub struct NewNote {
     pub header: Vec<u8>,
     pub details: Vec<u8>,
     pub created_at: i64,
+    pub commitment_block_num: Option<i32>,
+    pub note_metadata: Option<Vec<u8>>,
 }
 
 impl From<&StoredNote> for NewNote {
@@ -38,6 +43,8 @@ impl From<&StoredNote> for NewNote {
             header: note.header.to_bytes(),
             details: note.details.clone(),
             created_at: note.created_at.timestamp_micros(),
+            commitment_block_num: note.commitment_block_num.map(|n| i32::try_from(n).expect("block number exceeds i32::MAX")),
+            note_metadata: note.note_metadata.clone(),
         }
     }
 }
@@ -62,6 +69,8 @@ impl TryFrom<Note> for StoredNote {
             details: note.details,
             created_at,
             seq: note.seq,
+            commitment_block_num: note.commitment_block_num.map(|n| u32::try_from(n).expect("negative block number in database")),
+            note_metadata: note.note_metadata,
         })
     }
 }

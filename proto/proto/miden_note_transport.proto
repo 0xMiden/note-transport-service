@@ -12,6 +12,12 @@ message TransportNote {
     bytes header = 1;
     // NoteDetails, can be encrypted
     bytes details = 2;
+    // Block number where the note's on-chain commitment was included.
+    // Lets the client start its commitment scan at the right block.
+    optional uint32 commitment_block_num = 3;
+    // Serialized NoteMetadata from the commitment block.
+    // Lets the client skip sync_notes entirely and transition to Committed.
+    optional bytes note_metadata = 4;
 }
 
 // API request for sending a note

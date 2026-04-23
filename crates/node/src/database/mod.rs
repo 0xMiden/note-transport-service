@@ -142,6 +142,8 @@ mod tests {
             details: vec![1, 2, 3, 4],
             created_at: Utc::now(),
             seq: 0, // ignored on INSERT
+            commitment_block_num: None,
+            note_metadata: None,
         };
 
         db.store_note(&note).await.unwrap();
@@ -172,6 +174,8 @@ mod tests {
             details: vec![1],
             created_at: Utc::now(),
             seq: 0,
+            commitment_block_num: None,
+            note_metadata: None,
         };
         db.store_note(&first).await.unwrap();
 
@@ -180,6 +184,8 @@ mod tests {
             details: vec![2],
             created_at: Utc::now(),
             seq: 0,
+            commitment_block_num: None,
+            note_metadata: None,
         };
         db.store_note(&second).await.unwrap();
 
@@ -237,6 +243,8 @@ mod tests {
                     details: vec![i as u8],
                     created_at: Utc::now(),
                     seq: 0,
+                    commitment_block_num: None,
+                    note_metadata: None,
                 })
                 .await
                 .unwrap();
@@ -267,6 +275,8 @@ mod tests {
             details: vec![1, 2, 3, 4],
             created_at: Utc::now(),
             seq: 0, // ignored on INSERT
+            commitment_block_num: None,
+            note_metadata: None,
         };
 
         db.store_note(&note).await.unwrap();
@@ -303,6 +313,8 @@ mod tests {
             details: vec![1],
             created_at: t,
             seq: 0,
+            commitment_block_num: None,
+            note_metadata: None,
         };
         db.store_note(&note1).await.unwrap();
 
@@ -317,6 +329,8 @@ mod tests {
             details: vec![2],
             created_at: t,
             seq: 0,
+            commitment_block_num: None,
+            note_metadata: None,
         };
         db.store_note(&note2).await.unwrap();
 
@@ -360,6 +374,8 @@ mod tests {
             details: vec![1],
             created_at: Utc::now(),
             seq: 0,
+            commitment_block_num: None,
+            note_metadata: None,
         })
         .await
         .unwrap();
@@ -378,6 +394,8 @@ mod tests {
             details: vec![2],
             created_at: Utc::now(),
             seq: 0,
+            commitment_block_num: None,
+            note_metadata: None,
         })
         .await
         .unwrap();
@@ -386,6 +404,8 @@ mod tests {
             details: vec![3],
             created_at: Utc::now(),
             seq: 0,
+            commitment_block_num: None,
+            note_metadata: None,
         })
         .await
         .unwrap();
@@ -448,6 +468,8 @@ mod tests {
             details: vec![1, 2, 3, 4],
             created_at: Utc::now(),
             seq: 0,
+            commitment_block_num: None,
+            note_metadata: None,
         };
         db.store_note(&note).await.unwrap();
 
@@ -487,6 +509,8 @@ mod tests {
                 details: vec![(i % 256) as u8],
                 created_at: Utc::now(),
                 seq: 0,
+                commitment_block_num: None,
+                note_metadata: None,
             })
             .await
             .unwrap();

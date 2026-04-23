@@ -8,5 +8,7 @@ diesel::table! {
         header -> Binary,
         details -> Binary,
         created_at -> BigInt,
+        commitment_block_num -> Nullable<Integer>,
+        note_metadata -> Nullable<Binary>,
     }
 }

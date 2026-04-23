@@ -9,6 +9,14 @@ pub struct TransportNote {
     /// NoteDetails, can be encrypted
     #[prost(bytes = "vec", tag = "2")]
     pub details: ::prost::alloc::vec::Vec<u8>,
+    /// Block number where the note's on-chain commitment was included.
+    /// Lets the client start its commitment scan at the right block.
+    #[prost(uint32, optional, tag = "3")]
+    pub commitment_block_num: ::core::option::Option<u32>,
+    /// Serialized NoteMetadata from the commitment block.
+    /// Lets the client skip sync_notes entirely and transition to Committed.
+    #[prost(bytes = "vec", optional, tag = "4")]
+    pub note_metadata: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 /// API request for sending a note
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
