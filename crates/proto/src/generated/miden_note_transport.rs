@@ -10,11 +10,29 @@ pub struct TransportNote {
     #[prost(bytes = "vec", tag = "2")]
     pub details: ::prost::alloc::vec::Vec<u8>,
     /// Block number where the note's on-chain commitment was included.
-    /// Lets the client start its commitment scan at the right block.
+    ///
+    /// Sender-populated, optional. The NTL stores this verbatim and does not
+    /// validate, fetch, or backfill it. Population strategies:
+    ///
+    /// * Exact: set after the sender's transaction confirms (typically
+    ///   5-15 seconds after submit on Miden). Gives the recipient the
+    ///   precise block to scan.
+    /// * Lower bound: set to the chain tip at send time, optionally minus
+    ///   a small safety margin. Any value \<= the actual commitment block
+    ///   works correctly - the recipient uses it as the floor for its
+    ///   commitment scan.
+    /// * Unset: the recipient falls back to its own lookback heuristic
+    ///   (currently a 20-block scan window in miden-client).
+    ///
+    /// Wallets that need deterministic note delivery should always populate
+    /// this field.
     #[prost(uint32, optional, tag = "3")]
     pub commitment_block_num: ::core::option::Option<u32>,
     /// Serialized NoteMetadata from the commitment block.
-    /// Lets the client skip sync_notes entirely and transition to Committed.
+    ///
+    /// Sender-populated, optional. When present, the recipient can skip
+    /// sync_notes entirely and transition the note to Committed immediately
+    /// during import. The NTL stores this verbatim without validation.
     #[prost(bytes = "vec", optional, tag = "4")]
     pub note_metadata: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }

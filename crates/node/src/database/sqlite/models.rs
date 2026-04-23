@@ -81,3 +81,45 @@ impl TryFrom<Note> for StoredNote {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use miden_protocol::utils::serde::Serializable;
+
+    use super::*;
+    use crate::database::DatabaseError;
+    use crate::test_utils::test_note_header;
+
+    /// The `TryFrom<Note> for StoredNote` conversion rejects a
+    /// `commitment_block_num` that exceeds `u32::MAX`. This guards against
+    /// corrupt or tampered DB rows where the `i64` column holds a value
+    /// outside the `u32` domain. Without this test the conversion guard at
+    /// line 74-78 is dead code from a coverage perspective.
+    #[test]
+    fn test_block_context_rejects_out_of_range_value() {
+        let header = test_note_header();
+        let raw_note = Note {
+            seq: 1,
+            id: header.id().as_bytes().to_vec(),
+            tag: 0,
+            header: header.to_bytes(),
+            details: vec![],
+            created_at: Utc::now().timestamp_micros(),
+            commitment_block_num: Some(i64::from(u32::MAX) + 1),
+            note_metadata: None,
+        };
+
+        let result = StoredNote::try_from(raw_note);
+        assert!(result.is_err(), "commitment_block_num above u32::MAX must be rejected");
+        match result.unwrap_err() {
+            DatabaseError::Deserialization(msg) => {
+                assert!(
+                    msg.contains("Invalid commitment_block_num"),
+                    "unexpected error message: {msg}"
+                );
+            },
+            other => panic!("expected DatabaseError::Deserialization, got: {other:?}"),
+        }
+    }
+}

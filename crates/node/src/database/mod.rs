@@ -539,4 +539,62 @@ mod tests {
         let (total_stats, _) = db.get_stats().await.unwrap();
         assert_eq!(usize::try_from(total_stats).unwrap(), total);
     }
+
+    /// Block context fields (`commitment_block_num`, `note_metadata`) survive
+    /// the full round-trip: `StoredNote` → `NewNote` → INSERT → SELECT → `Note` →
+    /// `StoredNote` → `TransportNote`.
+    ///
+    /// Also verifies `u32::MAX` (the upper bound of the proto `uint32` field)
+    /// round-trips correctly through the `i64` `SQLite` column, confirming no
+    /// truncation at the `i32::MAX` boundary.
+    #[tokio::test]
+    async fn test_block_context_round_trips_through_store_and_fetch() {
+        use miden_note_transport_proto::miden_note_transport::TransportNote;
+
+        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
+            .await
+            .unwrap();
+
+        // Store a note with typical block context values.
+        let note = StoredNote {
+            header: test_note_header(),
+            details: vec![10, 20, 30],
+            created_at: Utc::now(),
+            seq: 0,
+            commitment_block_num: Some(12345),
+            note_metadata: Some(vec![1, 2, 3, 4]),
+        };
+        db.store_note(&note).await.unwrap();
+
+        let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        assert_eq!(fetched.len(), 1);
+        assert_eq!(fetched[0].commitment_block_num, Some(12345));
+        assert_eq!(fetched[0].note_metadata, Some(vec![1, 2, 3, 4]));
+
+        // Proto conversion must preserve the fields.
+        let proto: TransportNote = fetched.into_iter().next().unwrap().into();
+        assert_eq!(proto.commitment_block_num, Some(12345));
+        assert_eq!(proto.note_metadata, Some(vec![1, 2, 3, 4]));
+
+        // Store a second note with u32::MAX to confirm the i64 column handles
+        // the full u32 range without truncation at i32::MAX (2,147,483,647).
+        let note_max = StoredNote {
+            header: test_note_header(),
+            details: vec![99],
+            created_at: Utc::now(),
+            seq: 0,
+            commitment_block_num: Some(u32::MAX),
+            note_metadata: None,
+        };
+        db.store_note(&note_max).await.unwrap();
+
+        // Fetch all notes (cursor 0) and find the u32::MAX one by details.
+        let all = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        let max_note = all.iter().find(|n| n.details == vec![99]).expect("u32::MAX note not found");
+        assert_eq!(
+            max_note.commitment_block_num,
+            Some(u32::MAX),
+            "u32::MAX must survive the u32 -> i64 -> u32 round-trip"
+        );
+    }
 }
