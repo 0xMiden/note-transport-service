@@ -33,9 +33,9 @@ use crate::metrics::MetricsGrpc;
 /// `fetch_notes` request. Guards against two concerns:
 ///   - Server CPU: deduplicating `request_data.tags` via `BTreeSet` is `O(n log n)`; a client
 ///     sending millions of tags can burn a worker.
-///   - SQLite `IN (...)`: the underlying driver caps bound variables at
+///   - `SQLite` `IN (...)`: the underlying driver caps bound variables at
 ///     `SQLITE_MAX_VARIABLE_NUMBER` (32766 on recent builds, lower on older); blow that and the
-///     query errors. Well below the SQLite cap so we have headroom for future query-plan changes.
+///     query errors. Well below the `SQLite` cap so we have headroom for future query-plan changes.
 ///
 /// A realistic wallet tracks O(10) to O(100) tags; 128 is generous without
 /// being an attack surface.
@@ -134,7 +134,10 @@ impl StreamerCtx {
 impl miden_note_transport_proto::miden_note_transport::miden_note_transport_server::MidenNoteTransport
     for GrpcServer
 {
-    #[tracing::instrument(skip(self), fields(operation = "grpc.send_note.request"))]
+    #[tracing::instrument(skip(self, request), fields(
+        operation = "grpc.send_note.request",
+        note_size = tracing::field::Empty,
+    ))]
     async fn send_note(
         &self,
         request: tonic::Request<SendNoteRequest>,
@@ -142,16 +145,33 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         let request_data = request.into_inner();
         let pnote = request_data.note.ok_or_else(|| Status::invalid_argument("Missing note"))?;
 
-        let timer = self.metrics.grpc_send_note_request((pnote.header.len() + pnote.details.len()) as u64);
+        let note_size = pnote.header.len() + pnote.details.len();
+        let span = tracing::Span::current();
+        span.record("note_size", note_size);
 
-        // Validate note size
-        if pnote.details.len() > self.config.max_note_size {
-            return Err(Status::resource_exhausted(format!("Note too large ({})", pnote.details.len())));
+        let timer = self.metrics.grpc_send_note_request(note_size as u64);
+
+        // Validate note size (details + optional metadata)
+        let payload_size = pnote.details.len() + pnote.note_metadata.as_ref().map_or(0, Vec::len);
+        if payload_size > self.config.max_note_size {
+            tracing::warn!(reason = "note_too_large", size = payload_size, max = self.config.max_note_size, "send_note rejected");
+            return Err(Status::resource_exhausted(format!("Note too large ({payload_size})")));
         }
 
         // Convert protobuf request to internal types
         let header = miden_protocol::note::NoteHeader::read_from_bytes(&pnote.header)
-            .map_err(|e| Status::invalid_argument(format!("Invalid header: {e:?}")))?;
+            .map_err(|e| {
+                tracing::warn!(reason = "invalid_header", "send_note rejected");
+                Status::invalid_argument(format!("Invalid header: {e:?}"))
+            })?;
+
+        tracing::debug!(
+            note_id = %header.id(),
+            tag = header.metadata().tag().as_u32(),
+            has_commitment_block_num = pnote.commitment_block_num.is_some(),
+            has_note_metadata = pnote.note_metadata.is_some(),
+            "send_note accepted"
+        );
 
         // Create note for database
         let note_for_db = crate::types::StoredNote {
@@ -160,6 +180,8 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             created_at: Utc::now(),
             // Ignored on INSERT: the DB assigns seq via AUTOINCREMENT.
             seq: 0,
+            commitment_block_num: pnote.commitment_block_num,
+            note_metadata: pnote.note_metadata,
         };
 
         self.database
@@ -171,7 +193,13 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         Ok(tonic::Response::new(SendNoteResponse {}))
     }
 
-    #[tracing::instrument(skip(self), fields(operation = "grpc.fetch_notes.request"))]
+    #[tracing::instrument(skip(self, request), fields(
+        operation = "grpc.fetch_notes.request",
+        tag_count = tracing::field::Empty,
+        cursor = tracing::field::Empty,
+        notes_returned = tracing::field::Empty,
+        response_cursor = tracing::field::Empty,
+    ))]
     async fn fetch_notes(
         &self,
         request: tonic::Request<FetchNotesRequest>,
@@ -186,6 +214,12 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         // through `SQLITE_MAX_VARIABLE_NUMBER` or return a pathologically
         // expensive query plan.
         if request_data.tags.len() > MAX_TAGS_PER_FETCH_REQUEST {
+            tracing::warn!(
+                reason = "too_many_tags",
+                tag_count = request_data.tags.len(),
+                max = MAX_TAGS_PER_FETCH_REQUEST,
+                "fetch_notes rejected"
+            );
             return Err(Status::invalid_argument(format!(
                 "Too many tags in fetch_notes request: {} (max {})",
                 request_data.tags.len(),
@@ -198,6 +232,10 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         let tag_set: BTreeSet<_> = request_data.tags.into_iter().collect();
         let tags: Vec<crate::types::NoteTag> = tag_set.into_iter().map(Into::into).collect();
         let cursor = request_data.cursor;
+
+        let span = tracing::Span::current();
+        span.record("tag_count", tags.len());
+        span.record("cursor", cursor);
 
         // Single-snapshot fetch across ALL tags. Running per-tag queries back
         // to back exposed a race where a concurrent INSERT could land between
@@ -221,6 +259,9 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
 
         let proto_notes: Vec<_> = stored_notes.into_iter().map(TransportNote::from).collect();
 
+        span.record("notes_returned", proto_notes.len());
+        span.record("response_cursor", rcursor);
+
         timer.finish("ok");
 
         let proto_notes_size = proto_notes.iter().map(|pnote| (pnote.header.len() + pnote.details.len()) as u64).sum();
@@ -233,14 +274,23 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
     }
 
     type StreamNotesStream = Sub;
-    #[tracing::instrument(skip(self), fields(operation = "grpc.stream_notes.request"))]
+    #[tracing::instrument(skip(self, request), fields(
+        operation = "grpc.stream_notes.request",
+        subscription_id = tracing::field::Empty,
+    ))]
     async fn stream_notes(
         &self,
         request: tonic::Request<StreamNotesRequest>,
     ) -> Result<tonic::Response<Self::StreamNotesStream>, tonic::Status> {
         let request_data = request.into_inner();
         let tag = request_data.tag.into();
-        let id = rand::rng().random();
+        let id: u64 = rand::rng().random();
+
+        let span = tracing::Span::current();
+        span.record("subscription_id", id);
+
+        tracing::debug!(tag = crate::types::NoteTag::as_u32(&tag), cursor = request_data.cursor, "stream_notes subscribe");
+
         let (sub_tx, sub_rx) = mpsc::channel(32);
         let sub = Sub::new(id, tag, sub_rx, self.streamer.tx.clone());
         let subf = Subface::new(id, tag, sub_tx);

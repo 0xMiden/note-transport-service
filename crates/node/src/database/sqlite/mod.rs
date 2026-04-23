@@ -115,8 +115,10 @@ impl DatabaseBackend for SqliteDatabase {
         Ok(Self { pool, metrics })
     }
 
-    #[tracing::instrument(skip(self), fields(operation = "db.store_note"))]
+    #[tracing::instrument(skip(self, note), fields(operation = "db.store_note"))]
     async fn store_note(&self, note: &StoredNote) -> Result<(), DatabaseError> {
+        tracing::debug!(note_id = %note.header.id(), tag = note.header.metadata().tag().as_u32(), "db store_note");
+
         let timer = self.metrics.db_store_note();
 
         let new_note = NewNote::from(note);
@@ -130,7 +132,6 @@ impl DatabaseBackend for SqliteDatabase {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self), fields(operation = "db.fetch_notes"))]
     async fn fetch_notes(
         &self,
         tag: NoteTag,
@@ -139,7 +140,12 @@ impl DatabaseBackend for SqliteDatabase {
         self.fetch_notes_by_tags(&[tag], cursor).await
     }
 
-    #[tracing::instrument(skip(self, tags), fields(operation = "db.fetch_notes_by_tags"))]
+    #[tracing::instrument(skip(self, tags), fields(
+        operation = "db.fetch_notes_by_tags",
+        tag_count = tags.len(),
+        cursor = cursor,
+        notes_returned = tracing::field::Empty,
+    ))]
     async fn fetch_notes_by_tags(
         &self,
         tags: &[NoteTag],
@@ -153,6 +159,7 @@ impl DatabaseBackend for SqliteDatabase {
         // so operators can see when pre-migration clients are being reset.
         let effective_cursor = if cursor > LEGACY_CURSOR_THRESHOLD {
             self.metrics.db_fetch_notes_legacy_cursor_reset();
+            tracing::info!(original_cursor = cursor, "Legacy cursor reset to 0");
             0
         } else {
             cursor
@@ -197,6 +204,7 @@ impl DatabaseBackend for SqliteDatabase {
             stored_notes.push(stored_note);
         }
 
+        tracing::Span::current().record("notes_returned", stored_notes.len());
         timer.finish("ok");
 
         Ok(stored_notes)

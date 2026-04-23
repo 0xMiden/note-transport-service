@@ -44,8 +44,12 @@ impl DatabaseMaintenance {
     async fn step(&mut self) -> Result<()> {
         let timer = self.metrics.db_maintenance_cleanup_notes();
 
-        self.database.cleanup_old_notes(self.config.retention_days).await?;
-        info!("Cleaned up old notes");
+        let deleted = self.database.cleanup_old_notes(self.config.retention_days).await?;
+        info!(
+            notes_deleted = deleted,
+            retention_days = self.config.retention_days,
+            "Maintenance cleanup completed"
+        );
 
         timer.finish("ok");
 
@@ -75,6 +79,8 @@ mod tests {
             details: vec![1, 2, 3, 4],
             created_at: Utc::now() - age,
             seq: 0, // ignored on INSERT
+            commitment_block_num: None,
+            note_metadata: None,
         }
     }
 
