@@ -176,8 +176,9 @@ impl DatabaseBackend for SqliteDatabase {
         let tag_values: Vec<i64> = tags.iter().map(|t| i64::from(t.as_u32())).collect();
 
         // Client-requested limit, clamped to the server cap.
-        let effective_limit =
-            limit.map_or(FETCH_NOTES_BATCH_SIZE, |l| i64::from(l).min(FETCH_NOTES_BATCH_SIZE));
+        let effective_limit = limit
+            .filter(|&l| l > 0)
+            .map_or(FETCH_NOTES_BATCH_SIZE, |l| i64::from(l).min(FETCH_NOTES_BATCH_SIZE));
 
         // Single query for all tags runs in ONE DB snapshot, so a concurrent
         // INSERT can't land between per-tag queries and get leapfrogged by the
@@ -207,6 +208,7 @@ impl DatabaseBackend for SqliteDatabase {
             stored_notes.push(stored_note);
         }
 
+        tracing::Span::current().record("notes_returned", stored_notes.len());
         timer.finish("ok");
 
         Ok(stored_notes)
