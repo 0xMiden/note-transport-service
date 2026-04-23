@@ -8,9 +8,9 @@ services:
       - "57292:57292"  # gRPC
       - "9091:9090"  # Health checks
     environment:
-      - OTEL_ENABLED=true
+      - MIDEN_TLNODE_ENABLE_OTEL=true
       - JSON_LOGGING=true
-      - OTEL_TRACES_ENDPOINT=http://otel-collector:4317
+      - MIDEN_TLNODE_OTEL_ENDPOINT=http://otel-collector:4317
       - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       - OTEL_SERVICE_NAME=miden-note-transport-node
       - RUST_LOG=INFO
