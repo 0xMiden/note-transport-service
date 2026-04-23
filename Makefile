@@ -98,31 +98,29 @@ docker-node-restart:
 	docker-compose -f bin/node/docker/docker-compose.yml --project-directory . restart
 
 
-#### # TODO(template) below sections for binary ####
-
 # --- installing ----------------------------------------------------------------------------------
 
-.PHONY: install-mybinary
-install-mybinary: ## Installs mybinary
-	cargo install --path bin/mybinary --locked
+.PHONY: install-node
+install-node: ## Installs the transport node binary
+	cargo install --path bin/node --locked
 
 # --- docker --------------------------------------------------------------------------------------
 
-.PHONY: docker-build-mybinary
-docker-build-mybinary: ## Builds the binary using Docker
+.PHONY: docker-build-node
+docker-build-node: ## Builds the node binary using Docker
 	@CREATED=$$(date) && \
-	VERSION=$$(cat bin/mybinary/Cargo.toml | grep -m 1 '^version' | cut -d '"' -f 2) && \
+	VERSION=$$(cat Cargo.toml | grep -m 1 '^version' | cut -d '"' -f 2) && \
 	COMMIT=$$(git rev-parse HEAD) && \
 	docker build --build-arg CREATED="$$CREATED" \
         		 --build-arg VERSION="$$VERSION" \
           		 --build-arg COMMIT="$$COMMIT" \
-                 -f bin/mybinary/Dockerfile \
-                 -t miden-mybinary-image .
+                 -f bin/node/docker/Dockerfile \
+                 -t miden-note-transport-node .
 
-.PHONY: docker-run-mybinary
-docker-run-mybinary: ## Runs mybinary as a Docker container
-	docker volume create mybinary-db
-	docker run --name miden-mybinary \
-			   -p 57291:57291 \
-               -v mybinary-db:/db \
-               -d miden-mybinary-image
+.PHONY: docker-run-node
+docker-run-node: ## Runs the node as a Docker container
+	docker volume create node-db
+	docker run --name miden-note-transport-node \
+			   -p 57292:57292 \
+               -v node-db:/db \
+               -d miden-note-transport-node
