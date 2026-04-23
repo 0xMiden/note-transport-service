@@ -29,7 +29,7 @@ anyhow = { default-features = false, version = "1.0" }
 async-trait = { version = "0.1" }
 base64 = { version = "0.22" }
 chrono = { features = ["serde"], version = "0.4" }
-clap = { features = ["derive"], version = "4.5" }
+clap = { features = ["derive", "env"], version = "4.5" }
 deadpool = { default-features = false, features = ["managed", "rt_tokio_1"], version = "0.12" }
 deadpool-sync = { version = "0.1" }
 fs-err = { version = "3" }
