@@ -58,7 +58,7 @@ doc: ## Generates & checks documentation
 
 .PHONY: book
 book: ## Builds the book & serves documentation site
-	mdbook serve --open docs
+	cd docs && npm install && npm run start:dev
 
 # --- testing -------------------------------------------------------------------------------------
 
