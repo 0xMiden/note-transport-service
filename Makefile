@@ -58,7 +58,8 @@ doc: ## Generates & checks documentation
 
 .PHONY: book
 book: ## Builds the book & serves documentation site
-	mdbook serve --open docs
+	@echo "Docs are authored in docs/external/src and ingested by 0xMiden/docs."
+	@echo "Preview them from the docs repo after running its ingestion workflow."
 
 # --- testing -------------------------------------------------------------------------------------
 
