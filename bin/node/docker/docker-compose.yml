@@ -6,7 +6,7 @@ services:
       dockerfile: bin/node/docker/Dockerfile
     ports:
       - "57292:57292"  # gRPC
-      - "9091:9090"  # Health checks
+    command: ["miden-note-transport-node-bin", "--host", "0.0.0.0", "--database-url", "/app/data/node.db"]
     environment:
       - OTEL_ENABLED=true
       - JSON_LOGGING=true
@@ -15,7 +15,6 @@ services:
       - OTEL_SERVICE_NAME=miden-note-transport-node
       - RUST_LOG=INFO
       - DOCKER_ENV=true
-      - DATABASE_URL=/app/data/node.db
     volumes:
       - node_data:/app/data
     depends_on:
