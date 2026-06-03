@@ -44,8 +44,6 @@ allow = [
   "ISC",
   "JSON",
   "MIT",
-  # Weak (file-level) copyleft, used only by build-time deps of the miden stack
-  # (pubgrub, version-ranges, priority-queue via miden-package-registry).
   "MPL-2.0",
   "MS-PL",
   "OpenSSL",
