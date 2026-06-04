@@ -44,6 +44,7 @@ allow = [
   "ISC",
   "JSON",
   "MIT",
+  "MPL-2.0",
   "MS-PL",
   "OpenSSL",
   "PostgreSQL",
