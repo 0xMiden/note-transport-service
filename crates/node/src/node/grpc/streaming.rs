@@ -1,6 +1,7 @@
 use core::task::{Poll, Waker};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use miden_note_transport_proto::miden_note_transport::{StreamNotesUpdate, TransportNote};
 use tokio::sync::mpsc;
@@ -58,6 +59,7 @@ pub struct Sub {
     tag: NoteTag,
     rx: mpsc::Receiver<TransportNotesPg>,
     streamer_tx: mpsc::Sender<StreamerMessage>,
+    created_at: Instant,
 }
 
 /// Subscription interface
@@ -124,8 +126,9 @@ impl NoteStreamerManager {
                 }
             }
         }
-        // Remove non-responding subs
+        // Remove non-responding subs (backpressure)
         for (sub_id, tag) in remove_subs {
+            tracing::warn!(subscription_id = %sub_id, tag = tag.as_u32(), reason = "backpressure", "Dropping subscription");
             self.remove_sub(sub_id, tag);
         }
     }
@@ -146,6 +149,8 @@ impl NoteStreamerManager {
     pub fn add_sub(&mut self, sub: Subface) {
         let entry = self.tags.entry(sub.tag).or_insert_with(TagData::new);
         entry.subs.insert(sub.id, sub.tx);
+        let active = self.tags.values().map(|td| td.subs.len()).sum::<usize>();
+        tracing::info!(subscription_id = %sub.id, tag = sub.tag.as_u32(), active_subscriptions = active, "Subscription added");
     }
 
     pub fn remove_sub(&mut self, sub_id: u64, tag: NoteTag) {
@@ -153,13 +158,14 @@ impl NoteStreamerManager {
         if let Some(tag_data) = self.tags.get_mut(&tag) {
             tag_data.subs.remove(&sub_id);
             if tag_data.subs.is_empty() {
-                // No more subscribers for this tag
                 remove_tag = true;
             }
         }
         if remove_tag {
             self.tags.remove(&tag);
         }
+        let active = self.tags.values().map(|td| td.subs.len()).sum::<usize>();
+        tracing::info!(subscription_id = %sub_id, tag = tag.as_u32(), active_subscriptions = active, "Subscription removed");
     }
 }
 
@@ -218,7 +224,13 @@ impl Sub {
         rx: mpsc::Receiver<TransportNotesPg>,
         streamer_tx: mpsc::Sender<StreamerMessage>,
     ) -> Self {
-        Self { id, tag, rx, streamer_tx }
+        Self {
+            id,
+            tag,
+            rx,
+            streamer_tx,
+            created_at: Instant::now(),
+        }
     }
 }
 
@@ -267,8 +279,16 @@ impl tonic::codegen::tokio_stream::Stream for Sub {
 
 impl Drop for Sub {
     fn drop(&mut self) {
+        let duration_secs = self.created_at.elapsed().as_secs();
+        tracing::info!(
+            subscription_id = %self.id,
+            tag = self.tag.as_u32(),
+            duration_secs = duration_secs,
+            reason = "client_disconnect",
+            "Subscription dropped"
+        );
         if let Err(e) = self.streamer_tx.try_send(StreamerMessage::RemoveSub((self.id, self.tag))) {
-            tracing::error!("Streamer remove sub control message sending error: {e}");
+            tracing::error!(subscription_id = %self.id, tag = self.tag.as_u32(), "Streamer remove sub control message sending error: {e}");
         }
     }
 }
