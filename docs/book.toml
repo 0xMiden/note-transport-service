@@ -1,0 +1,16 @@
+[book]
+authors      = ["Miden contributors"]
+description  = "Manual for the Miden Transport Service node software which is responsible for exchanging private notes in the Miden ecosystem."
+language     = "en"
+multilingual = false
+title        = "The Miden Transport Service Node Operator and Developer Guide"
+
+[output.html]
+git-repository-url = "https://github.com/0xMiden/note-transport-service"
+
+[preprocessor.katex]
+after = ["links"]
+
+[preprocessor.alerts]
+
+[output.linkcheck]
