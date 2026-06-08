@@ -33,9 +33,9 @@ use crate::metrics::MetricsGrpc;
 /// `fetch_notes` request. Guards against two concerns:
 ///   - Server CPU: deduplicating `request_data.tags` via `BTreeSet` is `O(n log n)`; a client
 ///     sending millions of tags can burn a worker.
-///   - SQLite `IN (...)`: the underlying driver caps bound variables at
+///   - `SQLite` `IN (...)`: the underlying driver caps bound variables at
 ///     `SQLITE_MAX_VARIABLE_NUMBER` (32766 on recent builds, lower on older); blow that and the
-///     query errors. Well below the SQLite cap so we have headroom for future query-plan changes.
+///     query errors. Well below the `SQLite` cap so we have headroom for future query-plan changes.
 ///
 /// A realistic wallet tracks O(10) to O(100) tags; 128 is generous without
 /// being an attack surface.
@@ -206,7 +206,7 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         // matching rows in one consistent snapshot.
         let stored_notes = self
             .database
-            .fetch_notes_by_tags(&tags, cursor)
+            .fetch_notes_by_tags(&tags, cursor, request_data.limit)
             .await
             .map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
 
@@ -307,7 +307,7 @@ mod tests {
         let server = test_server().await;
 
         let tags = vec![0u32; MAX_TAGS_PER_FETCH_REQUEST + 1];
-        let request = tonic::Request::new(FetchNotesRequest { tags, cursor: 0 });
+        let request = tonic::Request::new(FetchNotesRequest { tags, cursor: 0, limit: None });
         let result = server.fetch_notes(request).await;
 
         let status = result.expect_err("expected InvalidArgument");
@@ -327,7 +327,7 @@ mod tests {
         let server = test_server().await;
 
         let tags = vec![0u32; MAX_TAGS_PER_FETCH_REQUEST];
-        let request = tonic::Request::new(FetchNotesRequest { tags, cursor: 0 });
+        let request = tonic::Request::new(FetchNotesRequest { tags, cursor: 0, limit: None });
         let result = server.fetch_notes(request).await;
 
         let response = result.expect("request at the cap must succeed").into_inner();

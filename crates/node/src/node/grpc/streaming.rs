@@ -82,7 +82,7 @@ impl NoteStreamerManager {
 
         let mut updates = vec![];
         for (tag, tag_data) in &self.tags {
-            let snotes = self.database.fetch_notes(*tag, tag_data.cursor).await?;
+            let snotes = self.database.fetch_notes(*tag, tag_data.cursor, None).await?;
             let mut cursor = tag_data.cursor;
             for snote in &snotes {
                 // Advance cursor using the DB-assigned monotonic `seq`

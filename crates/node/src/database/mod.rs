@@ -27,6 +27,7 @@ pub trait DatabaseBackend: Send + Sync {
         &self,
         tag: NoteTag,
         cursor: u64,
+        limit: Option<u32>,
     ) -> Result<Vec<StoredNote>, DatabaseError>;
 
     /// Fetch notes matching ANY of a set of tags, in a single DB snapshot.
@@ -34,10 +35,14 @@ pub trait DatabaseBackend: Send + Sync {
     /// This is the preferred multi-tag query — running per-tag queries back
     /// to back reopens a race where a concurrent INSERT can land between two
     /// per-tag queries and get leapfrogged by the cursor advance.
+    ///
+    /// `limit` caps the number of returned notes. When `None`, the server's
+    /// default batch size applies. Values above the server cap are clamped.
     async fn fetch_notes_by_tags(
         &self,
         tags: &[NoteTag],
         cursor: u64,
+        limit: Option<u32>,
     ) -> Result<Vec<StoredNote>, DatabaseError>;
 
     /// Get statistics about the database
@@ -94,8 +99,9 @@ impl Database {
         &self,
         tag: NoteTag,
         cursor: u64,
+        limit: Option<u32>,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
-        self.backend.fetch_notes(tag, cursor).await
+        self.backend.fetch_notes(tag, cursor, limit).await
     }
 
     /// Fetch notes matching ANY of a set of tags, in a single DB snapshot.
@@ -103,8 +109,9 @@ impl Database {
         &self,
         tags: &[NoteTag],
         cursor: u64,
+        limit: Option<u32>,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
-        self.backend.fetch_notes_by_tags(tags, cursor).await
+        self.backend.fetch_notes_by_tags(tags, cursor, limit).await
     }
 
     /// Get statistics about the database
@@ -147,7 +154,7 @@ mod tests {
         db.store_note(&note).await.unwrap();
 
         // Cursor is now seq-based; 0 fetches everything.
-        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        let fetched_notes = db.fetch_notes(TAG_LOCAL_ANY.into(), 0, None).await.unwrap();
         assert_eq!(fetched_notes.len(), 1);
         assert_eq!(fetched_notes[0].header.id(), note.header.id());
         assert!(fetched_notes[0].seq > 0);
@@ -184,7 +191,7 @@ mod tests {
         db.store_note(&second).await.unwrap();
 
         // Fetch everything and assert INSERT order = read order = seq ascending.
-        let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0, None).await.unwrap();
         assert_eq!(fetched.len(), 2);
         assert!(
             fetched[0].seq < fetched[1].seq,
@@ -197,7 +204,7 @@ mod tests {
 
         // Cursor between the two seqs returns only the second.
         let mid_cursor = u64::try_from(fetched[0].seq).expect("seq is non-negative");
-        let after_first = db.fetch_notes(TAG_LOCAL_ANY.into(), mid_cursor).await.unwrap();
+        let after_first = db.fetch_notes(TAG_LOCAL_ANY.into(), mid_cursor, None).await.unwrap();
         assert_eq!(after_first.len(), 1);
         assert_eq!(after_first[0].details, vec![2]);
     }
@@ -244,8 +251,8 @@ mod tests {
         }
         while writers.join_next().await.is_some() {}
 
-        let fetched_a = db.fetch_notes(TAG_A.into(), 0).await.unwrap();
-        let fetched_b = db.fetch_notes(TAG_B.into(), 0).await.unwrap();
+        let fetched_a = db.fetch_notes(TAG_A.into(), 0, None).await.unwrap();
+        let fetched_b = db.fetch_notes(TAG_B.into(), 0, None).await.unwrap();
         assert_eq!(
             fetched_a.len() + fetched_b.len(),
             40,
@@ -272,14 +279,14 @@ mod tests {
         db.store_note(&note).await.unwrap();
 
         // cursor=0 is strictly before any assigned seq → should return the note
-        let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0, None).await.unwrap();
         assert_eq!(fetched.len(), 1);
         let stored_seq = fetched[0].seq;
         assert!(stored_seq > 0, "expected seq > 0, got {stored_seq}");
 
         // cursor = the note's own seq → strictly-greater filter excludes it
         let cursor = u64::try_from(stored_seq).expect("seq is non-negative");
-        let after = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor).await.unwrap();
+        let after = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor, None).await.unwrap();
         assert_eq!(after.len(), 0);
     }
 
@@ -307,7 +314,7 @@ mod tests {
         db.store_note(&note1).await.unwrap();
 
         // Client's first fetch sees note1, advances cursor using the returned seq.
-        let first = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        let first = db.fetch_notes(TAG_LOCAL_ANY.into(), 0, None).await.unwrap();
         assert_eq!(first.len(), 1);
         let cursor = u64::try_from(first[0].seq).expect("seq is non-negative");
 
@@ -322,7 +329,7 @@ mod tests {
 
         // With seq cursor: note2 has seq > cursor → returned.
         // With old timestamp cursor: note2.ts == cursor → filtered by strict `>` → LOST.
-        let second = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor).await.unwrap();
+        let second = db.fetch_notes(TAG_LOCAL_ANY.into(), cursor, None).await.unwrap();
         assert_eq!(
             second.len(),
             1,
@@ -366,7 +373,7 @@ mod tests {
 
         // === Simulate the old per-tag loop ===
         // Step 1: fetch tag A.
-        let a_result = db.fetch_notes(TAG_A.into(), 0).await.unwrap();
+        let a_result = db.fetch_notes(TAG_A.into(), 0, None).await.unwrap();
         assert_eq!(a_result.len(), 1);
 
         // Between the per-tag queries, two concurrent writes commit in order:
@@ -391,7 +398,7 @@ mod tests {
         .unwrap();
 
         // Step 2: fetch tag B.
-        let b_result = db.fetch_notes(TAG_B.into(), 0).await.unwrap();
+        let b_result = db.fetch_notes(TAG_B.into(), 0, None).await.unwrap();
         assert_eq!(b_result.len(), 1);
 
         // Client advances cursor to max(seq) across both results, mirroring the
@@ -404,8 +411,8 @@ mod tests {
             .unwrap_or(0);
 
         // Client's next per-tag fetches with the advanced cursor.
-        let retry_a = db.fetch_notes(TAG_A.into(), rcursor).await.unwrap();
-        let retry_b = db.fetch_notes(TAG_B.into(), rcursor).await.unwrap();
+        let retry_a = db.fetch_notes(TAG_A.into(), rcursor, None).await.unwrap();
+        let retry_b = db.fetch_notes(TAG_B.into(), rcursor, None).await.unwrap();
 
         // Per-tag loop sees only 2 of the 3 notes — the interleaved tag A
         // insert with the details=[2] payload is missing.
@@ -420,7 +427,8 @@ mod tests {
         );
 
         // === The fix: single-snapshot multi-tag query ===
-        let snapshot = db.fetch_notes_by_tags(&[TAG_A.into(), TAG_B.into()], 0).await.unwrap();
+        let snapshot =
+            db.fetch_notes_by_tags(&[TAG_A.into(), TAG_B.into()], 0, None).await.unwrap();
         assert_eq!(
             snapshot.len(),
             3,
@@ -454,7 +462,7 @@ mod tests {
         // A realistic "legacy" cursor — microseconds since the epoch, currently
         // ~1.76×10^15. Well above the 10^12 threshold.
         let legacy_cursor: u64 = 1_760_000_000_000_000;
-        let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), legacy_cursor).await.unwrap();
+        let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), legacy_cursor, None).await.unwrap();
         assert_eq!(
             fetched.len(),
             1,
@@ -463,7 +471,7 @@ mod tests {
 
         // Sanity check: a non-legacy cursor above the note's seq should NOT trigger the reset.
         let normal_cursor: u64 = 1_000;
-        let empty = db.fetch_notes(TAG_LOCAL_ANY.into(), normal_cursor).await.unwrap();
+        let empty = db.fetch_notes(TAG_LOCAL_ANY.into(), normal_cursor, None).await.unwrap();
         assert_eq!(empty.len(), 0, "normal cursor > seq should filter correctly");
     }
 
@@ -493,7 +501,7 @@ mod tests {
         }
 
         // First fetch from cursor=0 returns exactly BATCH_SIZE rows.
-        let first = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        let first = db.fetch_notes(TAG_LOCAL_ANY.into(), 0, None).await.unwrap();
         assert_eq!(
             i64::try_from(first.len()).unwrap(),
             FETCH_NOTES_BATCH_SIZE,
@@ -502,13 +510,13 @@ mod tests {
 
         // Advance cursor to max(seq) and refetch — remaining rows come back.
         let advanced: u64 = first.iter().map(|n| u64::try_from(n.seq).unwrap()).max().unwrap();
-        let second = db.fetch_notes(TAG_LOCAL_ANY.into(), advanced).await.unwrap();
+        let second = db.fetch_notes(TAG_LOCAL_ANY.into(), advanced, None).await.unwrap();
         assert_eq!(second.len(), extra, "second batch must contain the remaining {extra} rows");
 
         // Third fetch drains nothing (nothing left).
         let third_cursor: u64 =
             second.iter().map(|n| u64::try_from(n.seq).unwrap()).max().unwrap_or(advanced);
-        let third = db.fetch_notes(TAG_LOCAL_ANY.into(), third_cursor).await.unwrap();
+        let third = db.fetch_notes(TAG_LOCAL_ANY.into(), third_cursor, None).await.unwrap();
         assert_eq!(third.len(), 0, "drained");
 
         // Stats reflect every row written.
