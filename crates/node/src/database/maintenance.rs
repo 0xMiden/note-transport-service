@@ -75,6 +75,8 @@ mod tests {
             details: vec![1, 2, 3, 4],
             created_at: Utc::now() - age,
             seq: 0, // ignored on INSERT
+            commitment_block_num: None,
+            note_metadata: None,
         }
     }
 

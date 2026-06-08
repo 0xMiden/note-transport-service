@@ -33,9 +33,9 @@ use crate::metrics::MetricsGrpc;
 /// `fetch_notes` request. Guards against two concerns:
 ///   - Server CPU: deduplicating `request_data.tags` via `BTreeSet` is `O(n log n)`; a client
 ///     sending millions of tags can burn a worker.
-///   - SQLite `IN (...)`: the underlying driver caps bound variables at
+///   - `SQLite` `IN (...)`: the underlying driver caps bound variables at
 ///     `SQLITE_MAX_VARIABLE_NUMBER` (32766 on recent builds, lower on older); blow that and the
-///     query errors. Well below the SQLite cap so we have headroom for future query-plan changes.
+///     query errors. Well below the `SQLite` cap so we have headroom for future query-plan changes.
 ///
 /// A realistic wallet tracks O(10) to O(100) tags; 128 is generous without
 /// being an attack surface.
@@ -144,9 +144,10 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
 
         let timer = self.metrics.grpc_send_note_request((pnote.header.len() + pnote.details.len()) as u64);
 
-        // Validate note size
-        if pnote.details.len() > self.config.max_note_size {
-            return Err(Status::resource_exhausted(format!("Note too large ({})", pnote.details.len())));
+        // Validate note size (details + optional metadata)
+        let payload_size = pnote.details.len() + pnote.note_metadata.as_ref().map_or(0, Vec::len);
+        if payload_size > self.config.max_note_size {
+            return Err(Status::resource_exhausted(format!("Note too large ({payload_size})")));
         }
 
         // Convert protobuf request to internal types
@@ -160,6 +161,8 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             created_at: Utc::now(),
             // Ignored on INSERT: the DB assigns seq via AUTOINCREMENT.
             seq: 0,
+            commitment_block_num: pnote.commitment_block_num,
+            note_metadata: pnote.note_metadata,
         };
 
         self.database
