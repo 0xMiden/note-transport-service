@@ -29,7 +29,7 @@ message TransportNote {
     //
     // Wallets that need deterministic note delivery should always populate
     // this field.
-    optional uint32 commitment_block_num = 3;
+    optional uint32 after_block_num = 3;
 
     // Serialized NoteMetadata from the commitment block.
     //

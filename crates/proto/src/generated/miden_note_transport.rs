@@ -27,7 +27,7 @@ pub struct TransportNote {
     /// Wallets that need deterministic note delivery should always populate
     /// this field.
     #[prost(uint32, optional, tag = "3")]
-    pub commitment_block_num: ::core::option::Option<u32>,
+    pub after_block_num: ::core::option::Option<u32>,
     /// Serialized NoteMetadata from the commitment block.
     ///
     /// Sender-populated, optional. When present, the recipient can skip

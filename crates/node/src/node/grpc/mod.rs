@@ -161,7 +161,7 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             created_at: Utc::now(),
             // Ignored on INSERT: the DB assigns seq via AUTOINCREMENT.
             seq: 0,
-            commitment_block_num: pnote.commitment_block_num,
+            after_block_num: pnote.after_block_num,
             note_metadata: pnote.note_metadata,
         };
 

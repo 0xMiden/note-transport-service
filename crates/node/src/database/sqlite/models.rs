@@ -16,7 +16,7 @@ pub struct Note {
     pub header: Vec<u8>,
     pub details: Vec<u8>,
     pub created_at: i64,
-    pub commitment_block_num: Option<i64>,
+    pub after_block_num: Option<i64>,
     pub note_metadata: Option<Vec<u8>>,
 }
 
@@ -31,7 +31,7 @@ pub struct NewNote {
     pub header: Vec<u8>,
     pub details: Vec<u8>,
     pub created_at: i64,
-    pub commitment_block_num: Option<i64>,
+    pub after_block_num: Option<i64>,
     pub note_metadata: Option<Vec<u8>>,
 }
 
@@ -43,7 +43,7 @@ impl From<&StoredNote> for NewNote {
             header: note.header.to_bytes(),
             details: note.details.clone(),
             created_at: note.created_at.timestamp_micros(),
-            commitment_block_num: note.commitment_block_num.map(i64::from),
+            after_block_num: note.after_block_num.map(i64::from),
             note_metadata: note.note_metadata.clone(),
         }
     }
@@ -69,11 +69,11 @@ impl TryFrom<Note> for StoredNote {
             details: note.details,
             created_at,
             seq: note.seq,
-            commitment_block_num: note
-                .commitment_block_num
+            after_block_num: note
+                .after_block_num
                 .map(|n| {
                     u32::try_from(n).map_err(|_| {
-                        DatabaseError::Deserialization(format!("Invalid commitment_block_num: {n}"))
+                        DatabaseError::Deserialization(format!("Invalid after_block_num: {n}"))
                     })
                 })
                 .transpose()?,
@@ -92,7 +92,7 @@ mod tests {
     use crate::test_utils::test_note_header;
 
     /// The `TryFrom<Note> for StoredNote` conversion rejects a
-    /// `commitment_block_num` that exceeds `u32::MAX`. This guards against
+    /// `after_block_num` that exceeds `u32::MAX`. This guards against
     /// corrupt or tampered DB rows where the `i64` column holds a value
     /// outside the `u32` domain. Without this test the conversion guard at
     /// line 74-78 is dead code from a coverage perspective.
@@ -106,16 +106,16 @@ mod tests {
             header: header.to_bytes(),
             details: vec![],
             created_at: Utc::now().timestamp_micros(),
-            commitment_block_num: Some(i64::from(u32::MAX) + 1),
+            after_block_num: Some(i64::from(u32::MAX) + 1),
             note_metadata: None,
         };
 
         let result = StoredNote::try_from(raw_note);
-        assert!(result.is_err(), "commitment_block_num above u32::MAX must be rejected");
+        assert!(result.is_err(), "after_block_num above u32::MAX must be rejected");
         match result.unwrap_err() {
             DatabaseError::Deserialization(msg) => {
                 assert!(
-                    msg.contains("Invalid commitment_block_num"),
+                    msg.contains("Invalid after_block_num"),
                     "unexpected error message: {msg}"
                 );
             },
