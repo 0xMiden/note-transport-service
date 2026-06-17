@@ -24,13 +24,6 @@ pub struct TransportNote {
     /// Wallets that need deterministic note delivery should always set it.
     #[prost(uint32, optional, tag = "3")]
     pub after_block_num: ::core::option::Option<u32>,
-    /// Serialized NoteMetadata from the commitment block.
-    ///
-    /// Sender-populated, optional. When present, the recipient can skip
-    /// sync_notes entirely and transition the note to Committed immediately
-    /// during import. The NTL stores this verbatim without validation.
-    #[prost(bytes = "vec", optional, tag = "4")]
-    pub note_metadata: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 /// API request for sending a note
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

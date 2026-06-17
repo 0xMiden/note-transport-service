@@ -144,10 +144,9 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
 
         let timer = self.metrics.grpc_send_note_request((pnote.header.len() + pnote.details.len()) as u64);
 
-        // Validate note size (details + optional metadata)
-        let payload_size = pnote.details.len() + pnote.note_metadata.as_ref().map_or(0, Vec::len);
-        if payload_size > self.config.max_note_size {
-            return Err(Status::resource_exhausted(format!("Note too large ({payload_size})")));
+        // Validate note size
+        if pnote.details.len() > self.config.max_note_size {
+            return Err(Status::resource_exhausted(format!("Note too large ({})", pnote.details.len())));
         }
 
         // Convert protobuf request to internal types
@@ -162,7 +161,6 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             // Ignored on INSERT: the DB assigns seq via AUTOINCREMENT.
             seq: 0,
             after_block_num: pnote.after_block_num,
-            note_metadata: pnote.note_metadata,
         };
 
         self.database

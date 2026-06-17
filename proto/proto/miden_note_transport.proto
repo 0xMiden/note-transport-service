@@ -26,13 +26,6 @@ message TransportNote {
     //
     // Wallets that need deterministic note delivery should always set it.
     optional uint32 after_block_num = 3;
-
-    // Serialized NoteMetadata from the commitment block.
-    //
-    // Sender-populated, optional. When present, the recipient can skip
-    // sync_notes entirely and transition the note to Committed immediately
-    // during import. The NTL stores this verbatim without validation.
-    optional bytes note_metadata = 4;
 }
 
 // API request for sending a note

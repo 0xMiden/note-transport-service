@@ -17,7 +17,6 @@ pub struct Note {
     pub details: Vec<u8>,
     pub created_at: i64,
     pub after_block_num: Option<i64>,
-    pub note_metadata: Option<Vec<u8>>,
 }
 
 // `seq` is omitted from `NewNote`: SQLite auto-assigns it on INSERT via
@@ -32,7 +31,6 @@ pub struct NewNote {
     pub details: Vec<u8>,
     pub created_at: i64,
     pub after_block_num: Option<i64>,
-    pub note_metadata: Option<Vec<u8>>,
 }
 
 impl From<&StoredNote> for NewNote {
@@ -44,7 +42,6 @@ impl From<&StoredNote> for NewNote {
             details: note.details.clone(),
             created_at: note.created_at.timestamp_micros(),
             after_block_num: note.after_block_num.map(i64::from),
-            note_metadata: note.note_metadata.clone(),
         }
     }
 }
@@ -77,7 +74,6 @@ impl TryFrom<Note> for StoredNote {
                     })
                 })
                 .transpose()?,
-            note_metadata: note.note_metadata,
         })
     }
 }
@@ -92,14 +88,14 @@ mod tests {
     use crate::test_utils::test_note_header;
 
     /// `TryFrom<Note> for StoredNote` runs on every fetched row. It must map
-    /// each column to the right field and preserve the optional block-context
-    /// fields in both the present and absent cases.
+    /// each column to the right field and preserve `after_block_num` in both
+    /// the present and absent cases.
     #[test]
     fn test_note_converts_to_stored_note() {
         let header = test_note_header();
         let created_at = Utc::now().timestamp_micros();
 
-        // Block context present: every field maps through.
+        // after_block_num present: every field maps through.
         let row = Note {
             seq: 7,
             id: header.id().as_bytes().to_vec(),
@@ -108,7 +104,6 @@ mod tests {
             details: vec![1, 2, 3],
             created_at,
             after_block_num: Some(100),
-            note_metadata: Some(vec![9, 9]),
         };
         let stored = StoredNote::try_from(row).expect("valid row must convert");
         assert_eq!(stored.seq, 7);
@@ -116,9 +111,8 @@ mod tests {
         assert_eq!(stored.details, vec![1, 2, 3]);
         assert_eq!(stored.created_at.timestamp_micros(), created_at);
         assert_eq!(stored.after_block_num, Some(100));
-        assert_eq!(stored.note_metadata, Some(vec![9, 9]));
 
-        // Block context absent: optionals stay None.
+        // after_block_num absent: the optional stays None.
         let bare = Note {
             seq: 8,
             id: header.id().as_bytes().to_vec(),
@@ -127,11 +121,9 @@ mod tests {
             details: vec![],
             created_at,
             after_block_num: None,
-            note_metadata: None,
         };
         let stored_bare = StoredNote::try_from(bare).expect("valid row must convert");
         assert_eq!(stored_bare.after_block_num, None);
-        assert_eq!(stored_bare.note_metadata, None);
     }
 
     /// An `after_block_num` outside the `u32` domain (only reachable via a
@@ -148,7 +140,6 @@ mod tests {
             details: vec![],
             created_at: Utc::now().timestamp_micros(),
             after_block_num: Some(i64::from(u32::MAX) + 1),
-            note_metadata: None,
         };
 
         match StoredNote::try_from(row) {

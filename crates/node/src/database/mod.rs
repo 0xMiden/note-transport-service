@@ -143,7 +143,6 @@ mod tests {
             created_at: Utc::now(),
             seq: 0, // ignored on INSERT
             after_block_num: None,
-            note_metadata: None,
         };
 
         db.store_note(&note).await.unwrap();
@@ -175,7 +174,6 @@ mod tests {
             created_at: Utc::now(),
             seq: 0,
             after_block_num: None,
-            note_metadata: None,
         };
         db.store_note(&first).await.unwrap();
 
@@ -185,7 +183,6 @@ mod tests {
             created_at: Utc::now(),
             seq: 0,
             after_block_num: None,
-            note_metadata: None,
         };
         db.store_note(&second).await.unwrap();
 
@@ -244,7 +241,6 @@ mod tests {
                     created_at: Utc::now(),
                     seq: 0,
                     after_block_num: None,
-                    note_metadata: None,
                 })
                 .await
                 .unwrap();
@@ -276,7 +272,6 @@ mod tests {
             created_at: Utc::now(),
             seq: 0, // ignored on INSERT
             after_block_num: None,
-            note_metadata: None,
         };
 
         db.store_note(&note).await.unwrap();
@@ -314,7 +309,6 @@ mod tests {
             created_at: t,
             seq: 0,
             after_block_num: None,
-            note_metadata: None,
         };
         db.store_note(&note1).await.unwrap();
 
@@ -330,7 +324,6 @@ mod tests {
             created_at: t,
             seq: 0,
             after_block_num: None,
-            note_metadata: None,
         };
         db.store_note(&note2).await.unwrap();
 
@@ -375,7 +368,6 @@ mod tests {
             created_at: Utc::now(),
             seq: 0,
             after_block_num: None,
-            note_metadata: None,
         })
         .await
         .unwrap();
@@ -395,7 +387,6 @@ mod tests {
             created_at: Utc::now(),
             seq: 0,
             after_block_num: None,
-            note_metadata: None,
         })
         .await
         .unwrap();
@@ -405,7 +396,6 @@ mod tests {
             created_at: Utc::now(),
             seq: 0,
             after_block_num: None,
-            note_metadata: None,
         })
         .await
         .unwrap();
@@ -469,7 +459,6 @@ mod tests {
             created_at: Utc::now(),
             seq: 0,
             after_block_num: None,
-            note_metadata: None,
         };
         db.store_note(&note).await.unwrap();
 
@@ -510,7 +499,6 @@ mod tests {
                 created_at: Utc::now(),
                 seq: 0,
                 after_block_num: None,
-                note_metadata: None,
             })
             .await
             .unwrap();
@@ -540,9 +528,8 @@ mod tests {
         assert_eq!(usize::try_from(total_stats).unwrap(), total);
     }
 
-    /// Block context fields (`after_block_num`, `note_metadata`) survive
-    /// the full round-trip: `StoredNote` → `NewNote` → INSERT → SELECT → `Note` →
-    /// `StoredNote` → `TransportNote`.
+    /// `after_block_num` survives the full round-trip: `StoredNote` →
+    /// `NewNote` → INSERT → SELECT → `Note` → `StoredNote` → `TransportNote`.
     ///
     /// Also verifies `u32::MAX` (the upper bound of the proto `uint32` field)
     /// round-trips correctly through the `i64` `SQLite` column, confirming no
@@ -555,26 +542,23 @@ mod tests {
             .await
             .unwrap();
 
-        // Store a note with typical block context values.
+        // Store a note with a typical after_block_num value.
         let note = StoredNote {
             header: test_note_header(),
             details: vec![10, 20, 30],
             created_at: Utc::now(),
             seq: 0,
             after_block_num: Some(12345),
-            note_metadata: Some(vec![1, 2, 3, 4]),
         };
         db.store_note(&note).await.unwrap();
 
         let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
         assert_eq!(fetched.len(), 1);
         assert_eq!(fetched[0].after_block_num, Some(12345));
-        assert_eq!(fetched[0].note_metadata, Some(vec![1, 2, 3, 4]));
 
-        // Proto conversion must preserve the fields.
+        // Proto conversion must preserve the field.
         let proto: TransportNote = fetched.into_iter().next().unwrap().into();
         assert_eq!(proto.after_block_num, Some(12345));
-        assert_eq!(proto.note_metadata, Some(vec![1, 2, 3, 4]));
 
         // Store a second note with u32::MAX to confirm the i64 column handles
         // the full u32 range without truncation at i32::MAX (2,147,483,647).
@@ -584,7 +568,6 @@ mod tests {
             created_at: Utc::now(),
             seq: 0,
             after_block_num: Some(u32::MAX),
-            note_metadata: None,
         };
         db.store_note(&note_max).await.unwrap();
 
