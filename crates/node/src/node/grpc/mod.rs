@@ -142,11 +142,14 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         let request_data = request.into_inner();
         let pnote = request_data.note.ok_or_else(|| Status::invalid_argument("Missing note"))?;
 
-        let timer = self.metrics.grpc_send_note_request((pnote.header.len() + pnote.details.len()) as u64);
+        // `header` + `details` are the stored payload; cap and metric use the
+        // same number so the recorded size matches what's actually limited.
+        let payload_size = pnote.header.len() + pnote.details.len();
+        let timer = self.metrics.grpc_send_note_request(payload_size as u64);
 
         // Validate note size
-        if pnote.details.len() > self.config.max_note_size {
-            return Err(Status::resource_exhausted(format!("Note too large ({})", pnote.details.len())));
+        if payload_size > self.config.max_note_size {
+            return Err(Status::resource_exhausted(format!("Note too large ({payload_size})")));
         }
 
         // Convert protobuf request to internal types

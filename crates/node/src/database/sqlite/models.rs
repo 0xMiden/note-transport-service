@@ -8,7 +8,6 @@ use crate::types::{NoteHeader, StoredNote};
 
 #[derive(Queryable, Selectable, Debug, Clone)]
 #[diesel(table_name = notes)]
-#[allow(clippy::struct_field_names)]
 pub struct Note {
     pub seq: i64,
     pub id: Vec<u8>,
