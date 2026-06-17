@@ -36,18 +36,6 @@ struct Args {
     /// Connection timeout in seconds
     #[arg(long, default_value = "4")]
     request_timeout: usize,
-
-    /// Enable OpenTelemetry tracing and metrics export
-    #[arg(long, env = "MIDEN_TLNODE_ENABLE_OTEL", default_value = "false")]
-    enable_otel: bool,
-
-    /// OpenTelemetry OTLP endpoint
-    #[arg(
-        long,
-        env = "MIDEN_TLNODE_OTEL_ENDPOINT",
-        default_value = "http://localhost:4317"
-    )]
-    otel_endpoint: String,
 }
 
 #[tokio::main]
@@ -55,8 +43,10 @@ async fn main() -> Result<()> {
     // Parse command line arguments
     let args = Args::parse();
 
-    // Setup tracing
-    let tracing_cfg = TracingConfig::new(args.enable_otel, args.otel_endpoint.clone());
+    // Setup tracing. OpenTelemetry export turns on when a standard OTLP
+    // endpoint env var is set (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or
+    // OTEL_EXPORTER_OTLP_ENDPOINT).
+    let tracing_cfg = TracingConfig::from_otel_env();
     setup_tracing(tracing_cfg.clone())?;
 
     info!("Starting Miden Transport Node...");

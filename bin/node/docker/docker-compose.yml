@@ -8,9 +8,8 @@ services:
       - "57292:57292"  # gRPC
     command: ["miden-note-transport-node-bin", "--host", "0.0.0.0", "--database-url", "/app/data/node.db"]
     environment:
-      - MIDEN_TLNODE_ENABLE_OTEL=true
       - JSON_LOGGING=true
-      - MIDEN_TLNODE_OTEL_ENDPOINT=http://otel-collector:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       - OTEL_SERVICE_NAME=miden-note-transport-node
       - RUST_LOG=INFO
