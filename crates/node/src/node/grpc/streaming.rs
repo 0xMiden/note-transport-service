@@ -1,6 +1,7 @@
 use core::task::{Poll, Waker};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use miden_note_transport_proto::miden_note_transport::{StreamNotesUpdate, TransportNote};
 use tokio::sync::mpsc;
@@ -35,8 +36,12 @@ struct NoteStreamerManager {
 pub(crate) enum StreamerMessage {
     /// New sub
     AddSub(Subface),
-    /// Remove sub
-    RemoveSub((u64, NoteTag)),
+    /// Remove sub, tagged with the reason for the lifecycle log
+    RemoveSub {
+        id: u64,
+        tag: NoteTag,
+        reason: &'static str,
+    },
     /// Update waker for sub
     Waker((u64, Waker)),
     /// Shutdown the streamer
@@ -49,7 +54,14 @@ pub struct TagData {
     /// forwarded to subscribers. Next fetch uses this to query
     /// `seq > cursor` and pick up only new arrivals.
     cursor: u64,
-    subs: BTreeMap<u64, mpsc::Sender<TransportNotesPg>>,
+    subs: BTreeMap<u64, SubEntry>,
+}
+
+/// A subscriber's send channel plus when it was registered, so the removal
+/// event can report how long the subscription lived.
+struct SubEntry {
+    tx: mpsc::Sender<TransportNotesPg>,
+    created_at: Instant,
 }
 
 /// Subscription
@@ -113,9 +125,9 @@ impl NoteStreamerManager {
         for (tag, notes) in tag_notes {
             if let Some(tag_data) = self.tags.get(&tag) {
                 // Wake-up subs with `tag`
-                for (sub_id, sub_tx) in &tag_data.subs {
+                for (sub_id, sub_entry) in &tag_data.subs {
                     if let Some(waker) = self.wakers.remove(sub_id) {
-                        if let Ok(()) = sub_tx.try_send(notes.clone()) {
+                        if let Ok(()) = sub_entry.tx.try_send(notes.clone()) {
                             waker.wake();
                         } else {
                             remove_subs.push((*sub_id, tag));
@@ -124,9 +136,9 @@ impl NoteStreamerManager {
                 }
             }
         }
-        // Remove non-responding subs
+        // Remove non-responding subs (backpressure)
         for (sub_id, tag) in remove_subs {
-            self.remove_sub(sub_id, tag);
+            self.remove_sub(sub_id, tag, "backpressure");
         }
     }
 
@@ -145,20 +157,35 @@ impl NoteStreamerManager {
 
     pub fn add_sub(&mut self, sub: Subface) {
         let entry = self.tags.entry(sub.tag).or_insert_with(TagData::new);
-        entry.subs.insert(sub.id, sub.tx);
+        entry.subs.insert(sub.id, SubEntry { tx: sub.tx, created_at: Instant::now() });
+        let active = self.tags.values().map(|td| td.subs.len()).sum::<usize>();
+        tracing::info!(subscription_id = %sub.id, active_subscriptions = active, "Subscription added");
     }
 
-    pub fn remove_sub(&mut self, sub_id: u64, tag: NoteTag) {
+    /// Removes a subscription and emits the single canonical removal event.
+    ///
+    /// Only logs when a sub was actually present: a sub evicted for
+    /// backpressure is later dropped client-side too, and that second call
+    /// must not emit a duplicate event or mislabel the reason.
+    pub fn remove_sub(&mut self, sub_id: u64, tag: NoteTag, reason: &'static str) {
+        let mut removed_at = None;
         let mut remove_tag = false;
         if let Some(tag_data) = self.tags.get_mut(&tag) {
-            tag_data.subs.remove(&sub_id);
-            if tag_data.subs.is_empty() {
-                // No more subscribers for this tag
-                remove_tag = true;
-            }
+            removed_at = tag_data.subs.remove(&sub_id).map(|entry| entry.created_at);
+            remove_tag = tag_data.subs.is_empty();
         }
         if remove_tag {
             self.tags.remove(&tag);
+        }
+        if let Some(created_at) = removed_at {
+            let active = self.tags.values().map(|td| td.subs.len()).sum::<usize>();
+            tracing::info!(
+                subscription_id = %sub_id,
+                active_subscriptions = active,
+                duration_secs = created_at.elapsed().as_secs(),
+                reason,
+                "Subscription removed"
+            );
         }
     }
 }
@@ -201,7 +228,9 @@ impl NoteStreamer {
             Some(msg) = rx.recv() => {
                 match msg {
                     StreamerMessage::AddSub(sub) => manager.add_sub(sub),
-                    StreamerMessage::RemoveSub((id, tag)) => manager.remove_sub(id, tag),
+                    StreamerMessage::RemoveSub { id, tag, reason } => {
+                        manager.remove_sub(id, tag, reason);
+                    },
                     StreamerMessage::Waker((id, waker)) => manager.update_waker(id, waker),
                     StreamerMessage::Shutdown => return Ok(false),
                 }
@@ -267,8 +296,15 @@ impl tonic::codegen::tokio_stream::Stream for Sub {
 
 impl Drop for Sub {
     fn drop(&mut self) {
-        if let Err(e) = self.streamer_tx.try_send(StreamerMessage::RemoveSub((self.id, self.tag))) {
-            tracing::error!("Streamer remove sub control message sending error: {e}");
+        // Hand removal to the manager, which emits the single lifecycle event.
+        // If the sub was already evicted (e.g. backpressure) this is a no-op
+        // and logs nothing.
+        if let Err(e) = self.streamer_tx.try_send(StreamerMessage::RemoveSub {
+            id: self.id,
+            tag: self.tag,
+            reason: "client_disconnect",
+        }) {
+            tracing::error!(subscription_id = %self.id, error = %e, "Streamer remove sub control message sending error");
         }
     }
 }
