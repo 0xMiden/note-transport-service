@@ -33,22 +33,20 @@ pub enum OpenTelemetry {
 }
 
 impl TracingConfig {
-    /// Tracing configuration constructor using environment variables
-    pub fn from_env() -> Self {
-        let otel = {
-            let otel_enabled = std::env::var("OTEL_ENABLED")
-                .unwrap_or_else(|_| "false".to_string())
-                .parse()
-                .unwrap_or(false);
-            if otel_enabled {
-                OpenTelemetry::Enabled {
-                    endpoint: std::env::var("OTEL_TRACES_ENDPOINT")
-                        .ok()
-                        .unwrap_or("http://localhost:4317".to_string()),
-                }
-            } else {
-                OpenTelemetry::Disabled
-            }
+    /// Build tracing configuration from the environment.
+    ///
+    /// OpenTelemetry export is enabled when a standard OTLP endpoint is configured via
+    /// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` (the former
+    /// takes precedence). When neither is set, export is disabled.
+    pub fn from_otel_env() -> Self {
+        let endpoint = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+            .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        let otel = match endpoint {
+            Some(endpoint) => OpenTelemetry::Enabled { endpoint },
+            None => OpenTelemetry::Disabled,
         };
 
         TracingConfig {

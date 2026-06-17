@@ -43,8 +43,10 @@ async fn main() -> Result<()> {
     // Parse command line arguments
     let args = Args::parse();
 
-    // Setup tracing
-    let tracing_cfg = TracingConfig::from_env();
+    // Setup tracing. OpenTelemetry export turns on when a standard OTLP
+    // endpoint env var is set (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or
+    // OTEL_EXPORTER_OTLP_ENDPOINT).
+    let tracing_cfg = TracingConfig::from_otel_env();
     setup_tracing(tracing_cfg.clone())?;
 
     info!("Starting Miden Transport Node...");
