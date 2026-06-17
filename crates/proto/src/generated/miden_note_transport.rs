@@ -9,6 +9,21 @@ pub struct TransportNote {
     /// NoteDetails, can be encrypted
     #[prost(bytes = "vec", tag = "2")]
     pub details: ::prost::alloc::vec::Vec<u8>,
+    /// Lower bound on the block at which the note's on-chain commitment landed:
+    /// the recipient scans from this block forward instead of using a default
+    /// lookback window.
+    ///
+    /// Sender-populated and optional; the NTL stores it verbatim and never
+    /// validates, fetches, or backfills it. Any value \<= the actual commitment
+    /// block is correct - a tighter value just means less for the recipient to
+    /// scan. Senders typically set it to the chain tip at send time, or to the
+    /// exact block once their transaction confirms. When unset, the recipient
+    /// falls back to its own lookback heuristic (currently a 20-block scan
+    /// window in miden-client).
+    ///
+    /// Wallets that need deterministic note delivery should always set it.
+    #[prost(uint32, optional, tag = "3")]
+    pub after_block_num: ::core::option::Option<u32>,
 }
 /// API request for sending a note
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

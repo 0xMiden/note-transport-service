@@ -12,6 +12,20 @@ message TransportNote {
     bytes header = 1;
     // NoteDetails, can be encrypted
     bytes details = 2;
+    // Lower bound on the block at which the note's on-chain commitment landed:
+    // the recipient scans from this block forward instead of using a default
+    // lookback window.
+    //
+    // Sender-populated and optional; the NTL stores it verbatim and never
+    // validates, fetches, or backfills it. Any value <= the actual commitment
+    // block is correct - a tighter value just means less for the recipient to
+    // scan. Senders typically set it to the chain tip at send time, or to the
+    // exact block once their transaction confirms. When unset, the recipient
+    // falls back to its own lookback heuristic (currently a 20-block scan
+    // window in miden-client).
+    //
+    // Wallets that need deterministic note delivery should always set it.
+    optional uint32 after_block_num = 3;
 }
 
 // API request for sending a note

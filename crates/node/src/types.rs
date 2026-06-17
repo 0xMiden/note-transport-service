@@ -31,6 +31,8 @@ pub struct StoredNote {
     /// Untouched when constructing a `StoredNote` for insertion — the DB
     /// assigns the real value via `INTEGER PRIMARY KEY AUTOINCREMENT`.
     pub seq: i64,
+    /// Block number where the note commitment was included on-chain.
+    pub after_block_num: Option<u32>,
 }
 
 impl From<StoredNote> for TransportNote {
@@ -38,6 +40,7 @@ impl From<StoredNote> for TransportNote {
         Self {
             header: snote.header.to_bytes(),
             details: snote.details,
+            after_block_num: snote.after_block_num,
         }
     }
 }

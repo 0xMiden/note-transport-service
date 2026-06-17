@@ -15,6 +15,7 @@ pub struct Note {
     pub header: Vec<u8>,
     pub details: Vec<u8>,
     pub created_at: i64,
+    pub after_block_num: Option<i64>,
 }
 
 // `seq` is omitted from `NewNote`: SQLite auto-assigns it on INSERT via
@@ -28,6 +29,7 @@ pub struct NewNote {
     pub header: Vec<u8>,
     pub details: Vec<u8>,
     pub created_at: i64,
+    pub after_block_num: Option<i64>,
 }
 
 impl From<&StoredNote> for NewNote {
@@ -38,6 +40,7 @@ impl From<&StoredNote> for NewNote {
             header: note.header.to_bytes(),
             details: note.details.clone(),
             created_at: note.created_at.timestamp_micros(),
+            after_block_num: note.after_block_num.map(i64::from),
         }
     }
 }
@@ -62,6 +65,87 @@ impl TryFrom<Note> for StoredNote {
             details: note.details,
             created_at,
             seq: note.seq,
+            after_block_num: note
+                .after_block_num
+                .map(|n| {
+                    u32::try_from(n).map_err(|_| {
+                        DatabaseError::Deserialization(format!("Invalid after_block_num: {n}"))
+                    })
+                })
+                .transpose()?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use miden_protocol::utils::serde::Serializable;
+
+    use super::*;
+    use crate::database::DatabaseError;
+    use crate::test_utils::test_note_header;
+
+    /// `TryFrom<Note> for StoredNote` runs on every fetched row. It must map
+    /// each column to the right field and preserve `after_block_num` in both
+    /// the present and absent cases.
+    #[test]
+    fn test_note_converts_to_stored_note() {
+        let header = test_note_header();
+        let created_at = Utc::now().timestamp_micros();
+
+        // after_block_num present: every field maps through.
+        let row = Note {
+            seq: 7,
+            id: header.id().as_bytes().to_vec(),
+            tag: 0,
+            header: header.to_bytes(),
+            details: vec![1, 2, 3],
+            created_at,
+            after_block_num: Some(100),
+        };
+        let stored = StoredNote::try_from(row).expect("valid row must convert");
+        assert_eq!(stored.seq, 7);
+        assert_eq!(stored.header.id().as_bytes(), header.id().as_bytes());
+        assert_eq!(stored.details, vec![1, 2, 3]);
+        assert_eq!(stored.created_at.timestamp_micros(), created_at);
+        assert_eq!(stored.after_block_num, Some(100));
+
+        // after_block_num absent: the optional stays None.
+        let bare = Note {
+            seq: 8,
+            id: header.id().as_bytes().to_vec(),
+            tag: 0,
+            header: header.to_bytes(),
+            details: vec![],
+            created_at,
+            after_block_num: None,
+        };
+        let stored_bare = StoredNote::try_from(bare).expect("valid row must convert");
+        assert_eq!(stored_bare.after_block_num, None);
+    }
+
+    /// An `after_block_num` outside the `u32` domain (only reachable via a
+    /// corrupt or tampered DB row) is rejected with a `DatabaseError` rather
+    /// than panicking or silently truncating.
+    #[test]
+    fn test_out_of_range_after_block_num_is_rejected() {
+        let header = test_note_header();
+        let row = Note {
+            seq: 1,
+            id: header.id().as_bytes().to_vec(),
+            tag: 0,
+            header: header.to_bytes(),
+            details: vec![],
+            created_at: Utc::now().timestamp_micros(),
+            after_block_num: Some(i64::from(u32::MAX) + 1),
+        };
+
+        match StoredNote::try_from(row) {
+            Err(DatabaseError::Deserialization(msg)) => {
+                assert!(msg.contains("Invalid after_block_num"), "unexpected message: {msg}");
+            },
+            other => panic!("expected Deserialization error, got: {other:?}"),
+        }
     }
 }

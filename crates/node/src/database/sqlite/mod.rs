@@ -184,7 +184,10 @@ impl DatabaseBackend for SqliteDatabase {
                     .filter(seq.gt(cursor_i64))
                     .order(seq.asc())
                     .limit(FETCH_NOTES_BATCH_SIZE)
-                    .load::<Note>(conn)?;
+                    // Name-based column selection (via `Selectable`) so a future
+                    // mid-table column insert can't silently misalign fields.
+                    .select(Note::as_select())
+                    .load(conn)?;
                 Ok(fetched_notes)
             })
             .await?;
