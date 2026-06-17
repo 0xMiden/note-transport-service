@@ -40,7 +40,7 @@ Skip the changelog only when the PR contains no runtime-affecting changes
 
 ### Changes
 
-- [BREAKING] Switched OpenTelemetry configuration to `--enable-otel`/`--otel-endpoint` flags and standard `OTEL_EXPORTER_OTLP_*` env vars, replacing `OTEL_ENABLED`/`OTEL_TRACES_ENDPOINT` ([#80](https://github.com/0xMiden/note-transport-service/pull/80)).
+- Changed OpenTelemetry configuration: enable via `--enable-otel`/`--otel-endpoint` flags or the standard `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` env vars. The previous `OTEL_ENABLED`/`OTEL_TRACES_ENDPOINT` vars are no longer read ([#80](https://github.com/0xMiden/note-transport-service/pull/80)).
 
 ## v0.4.0 (2026-06-08)
 
