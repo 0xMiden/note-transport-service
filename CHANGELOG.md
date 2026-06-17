@@ -31,13 +31,20 @@ Skip the changelog only when the PR contains no runtime-affecting changes
 (docs, CI, tooling, tests). In that case the hook will tell you to apply the
 `no changelog` label instead.
 
-## v0.4.0 (unreleased)
+## v0.4.1 (2026-06-17)
 
 ### Features
 
+- Added optional `after_block_num` to `TransportNote` so senders can give recipients a deterministic block floor for commitment scans ([#81](https://github.com/0xMiden/note-transport-service/pull/81)).
+- Added structured tracing fields across the gRPC, database, and streaming layers for debuggability ([#83](https://github.com/0xMiden/note-transport-service/pull/83)).
+
 ### Changes
 
-### Fixes
+- [BREAKING] Switched OpenTelemetry configuration to `--enable-otel`/`--otel-endpoint` flags and standard `OTEL_EXPORTER_OTLP_*` env vars, replacing `OTEL_ENABLED`/`OTEL_TRACES_ENDPOINT` ([#80](https://github.com/0xMiden/note-transport-service/pull/80)).
+
+## v0.4.0 (2026-06-08)
+
+Released without itemized changelog entries. See [`git log v0.3.2..v0.4.0`](https://github.com/0xMiden/note-transport-service/compare/v0.3.2...v0.4.0) for the change set.
 
 ## v0.3.1 (2026-04-08)
 
