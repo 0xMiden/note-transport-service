@@ -91,15 +91,56 @@ mod tests {
     use crate::database::DatabaseError;
     use crate::test_utils::test_note_header;
 
-    /// The `TryFrom<Note> for StoredNote` conversion rejects a
-    /// `after_block_num` that exceeds `u32::MAX`. This guards against
-    /// corrupt or tampered DB rows where the `i64` column holds a value
-    /// outside the `u32` domain. Without this test the conversion guard at
-    /// line 74-78 is dead code from a coverage perspective.
+    /// `TryFrom<Note> for StoredNote` runs on every fetched row. It must map
+    /// each column to the right field and preserve the optional block-context
+    /// fields in both the present and absent cases.
     #[test]
-    fn test_block_context_rejects_out_of_range_value() {
+    fn test_note_converts_to_stored_note() {
         let header = test_note_header();
-        let raw_note = Note {
+        let created_at = Utc::now().timestamp_micros();
+
+        // Block context present: every field maps through.
+        let row = Note {
+            seq: 7,
+            id: header.id().as_bytes().to_vec(),
+            tag: 0,
+            header: header.to_bytes(),
+            details: vec![1, 2, 3],
+            created_at,
+            after_block_num: Some(100),
+            note_metadata: Some(vec![9, 9]),
+        };
+        let stored = StoredNote::try_from(row).expect("valid row must convert");
+        assert_eq!(stored.seq, 7);
+        assert_eq!(stored.header.id().as_bytes(), header.id().as_bytes());
+        assert_eq!(stored.details, vec![1, 2, 3]);
+        assert_eq!(stored.created_at.timestamp_micros(), created_at);
+        assert_eq!(stored.after_block_num, Some(100));
+        assert_eq!(stored.note_metadata, Some(vec![9, 9]));
+
+        // Block context absent: optionals stay None.
+        let bare = Note {
+            seq: 8,
+            id: header.id().as_bytes().to_vec(),
+            tag: 0,
+            header: header.to_bytes(),
+            details: vec![],
+            created_at,
+            after_block_num: None,
+            note_metadata: None,
+        };
+        let stored_bare = StoredNote::try_from(bare).expect("valid row must convert");
+        assert_eq!(stored_bare.after_block_num, None);
+        assert_eq!(stored_bare.note_metadata, None);
+    }
+
+    /// An `after_block_num` outside the `u32` domain (only reachable via a
+    /// corrupt or tampered DB row) is rejected with a `DatabaseError` rather
+    /// than panicking or silently truncating.
+    #[test]
+    fn test_out_of_range_after_block_num_is_rejected() {
+        let header = test_note_header();
+        let row = Note {
             seq: 1,
             id: header.id().as_bytes().to_vec(),
             tag: 0,
@@ -110,16 +151,11 @@ mod tests {
             note_metadata: None,
         };
 
-        let result = StoredNote::try_from(raw_note);
-        assert!(result.is_err(), "after_block_num above u32::MAX must be rejected");
-        match result.unwrap_err() {
-            DatabaseError::Deserialization(msg) => {
-                assert!(
-                    msg.contains("Invalid after_block_num"),
-                    "unexpected error message: {msg}"
-                );
+        match StoredNote::try_from(row) {
+            Err(DatabaseError::Deserialization(msg)) => {
+                assert!(msg.contains("Invalid after_block_num"), "unexpected message: {msg}");
             },
-            other => panic!("expected DatabaseError::Deserialization, got: {other:?}"),
+            other => panic!("expected Deserialization error, got: {other:?}"),
         }
     }
 }
