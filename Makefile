@@ -87,15 +87,15 @@ build: ## Builds all crates and re-builds protobuf bindings for proto crates
 # --- node-docker ---------------------------------------------------------------------------------
 
 .PHONY: docker-node-up
-docker-node-up:
+docker-node-up: ## Starts up the local Docker compose environment
 	docker-compose -f bin/node/docker/docker-compose.yml --project-directory . up -d
 
 .PHONY: docker-node-down
-docker-node-down:
+docker-node-down: ## Stops the local Docker compose environment
 	docker-compose -f bin/node/docker/docker-compose.yml --project-directory . down
 
 .PHONY: docker-node-restart
-docker-node-restart:
+docker-node-restart: ## Restarts the local Docker compose environment
 	docker-compose -f bin/node/docker/docker-compose.yml --project-directory . restart
 
 

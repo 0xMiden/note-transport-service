@@ -5,8 +5,15 @@ services:
       context: .
       dockerfile: bin/node/docker/Dockerfile
     ports:
-      - "57292:57292"  # gRPC
-    command: ["miden-note-transport-node-bin", "--host", "0.0.0.0", "--database-url", "/app/data/node.db"]
+      - "57292:57292" # gRPC
+    command:
+      [
+        "miden-note-transport-node-bin",
+        "--host",
+        "0.0.0.0",
+        "--database-url",
+        "/app/data/node.db",
+      ]
     environment:
       - JSON_LOGGING=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
@@ -27,11 +34,10 @@ services:
     volumes:
       - ./bin/node/docker/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
     ports:
-      - "4317:4317"     # OTLP gRPC receiver (apps send traces here)
-      - "4318:4318"     # OTLP HTTP receiver
-      - "13133:13133"   # Health check
-      - "1777:1777"     # pprof
-      - "9464:9464"     # Prometheus metrics
+      - "4317:4317" # OTLP gRPC receiver (apps send traces here)
+      - "13133:13133" # Health check
+      - "1777:1777" # pprof
+      - "9464:9464" # Prometheus metrics
     depends_on:
       - tempo
     networks:
@@ -39,12 +45,12 @@ services:
 
   # Traces
   tempo:
-    image: grafana/tempo:latest
-    command: [ "-config.file=/etc/tempo.yaml" ]
+    image: grafana/tempo:2.10.4
+    command: ["-config.file=/etc/tempo.yaml"]
     volumes:
       - ./bin/node/docker/tempo.yaml:/etc/tempo.yaml:ro
     ports:
-      - "3200:3200"   # tempo
+      - "3200:3200" # tempo
     networks:
       - telemetry
 
@@ -65,19 +71,20 @@ services:
 
   # Visualization
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:12.4
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
+      - ./bin/node/docker/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
       - grafana_data:/var/lib/grafana
     networks:
       - telemetry
     depends_on:
       - tempo
-
 
 volumes:
   grafana_data:

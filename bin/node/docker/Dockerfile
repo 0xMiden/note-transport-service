@@ -1,7 +1,5 @@
 # Miden Note Transport Node
-FROM rust:1.90-slim-bookworm as builder
-
-
+FROM rust:1.90-slim-bookworm AS builder
 
 RUN apt-get update && \
     apt-get -y upgrade && \
@@ -24,7 +22,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && \
     apt-get -y upgrade && \
     apt-get install -y --no-install-recommends \
-    sqlite3 \
+    sqlite3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/cargo/bin/miden-note-transport-node-bin /usr/local/bin/miden-note-transport-node-bin
