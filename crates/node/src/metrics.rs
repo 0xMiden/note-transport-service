@@ -39,6 +39,8 @@ pub struct MetricsDatabase {
     fetch_notes_duration: Histogram<f64>,
     // legacy cursor reset (pre-seq-migration clients)
     fetch_notes_legacy_cursor_reset_count: Counter<u64>,
+    // stranded cursor reset (cursor above the seq high-water → DB recreated)
+    fetch_notes_stranded_cursor_reset_count: Counter<u64>,
     // Maintenance
     maintenance_cleanup_notes_count: Counter<u64>,
     maintenance_cleanup_notes_duration: Histogram<f64>,
@@ -178,6 +180,16 @@ impl MetricsDatabase {
             )
             .build();
 
+        let fetch_notes_stranded_cursor_reset_count = meter
+            .u64_counter("db_fetch_notes_stranded_cursor_reset_count")
+            .with_description(
+                "Number of fetch_notes() requests where the client's cursor was at or \
+                 below the legacy threshold but strictly above the current seq \
+                 high-water and reset to 0 (server seq space regressed — backing DB \
+                 recreated)",
+            )
+            .build();
+
         let maintenance_cleanup_notes_count = meter
             .u64_counter("db_maintenance_cleanup_notes_count")
             .with_description("Total number of DB maintenance cleanup_old_notes() requests")
@@ -195,6 +207,7 @@ impl MetricsDatabase {
             fetch_notes_count,
             fetch_notes_duration,
             fetch_notes_legacy_cursor_reset_count,
+            fetch_notes_stranded_cursor_reset_count,
             maintenance_cleanup_notes_count,
             maintenance_cleanup_notes_duration,
         }
@@ -225,6 +238,12 @@ impl MetricsDatabase {
     /// Record a legacy-cursor reset (pre-seq-migration client).
     pub fn db_fetch_notes_legacy_cursor_reset(&self) {
         self.fetch_notes_legacy_cursor_reset_count.add(1, &[]);
+    }
+
+    /// Record a stranded-cursor reset: the client's cursor was above the current
+    /// seq high-water and reset to 0 (server seq space regressed — DB recreated).
+    pub fn db_fetch_notes_stranded_cursor_reset(&self) {
+        self.fetch_notes_stranded_cursor_reset_count.add(1, &[]);
     }
 
     /// Measure a DB maintenance cleanup-old-notes procedure

@@ -94,8 +94,15 @@ impl NoteStreamerManager {
 
         let mut updates = vec![];
         for (tag, tag_data) in &self.tags {
-            let snotes = self.database.fetch_notes(*tag, tag_data.cursor).await?;
-            let mut cursor = tag_data.cursor;
+            // Use the tuple-returning fetch so a reset (legacy µs cursor, or a
+            // cursor stranded above the seq high-water after a DB recreation)
+            // flows into the advanced cursor. Basing the advance on the effective
+            // cursor — not `tag_data.cursor` — lets a stranded subscription heal
+            // instead of re-sending its stranded cursor and re-triggering the
+            // reset (and re-delivering the whole backlog) on every tick.
+            let (snotes, effective_cursor) =
+                self.database.fetch_notes_by_tags(&[*tag], tag_data.cursor).await?;
+            let mut cursor = effective_cursor;
             for snote in &snotes {
                 // Advance cursor using the DB-assigned monotonic `seq`
                 // (matches the pull-side fetch_notes contract). Using

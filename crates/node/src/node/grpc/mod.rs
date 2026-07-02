@@ -242,13 +242,20 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         // two per-tag queries and get leapfrogged when rcursor advanced past
         // its seq on the next fetch. A single `tag IN (…)` query reads all
         // matching rows in one consistent snapshot.
-        let stored_notes = self
+        let (stored_notes, effective_cursor) = self
             .database
             .fetch_notes_by_tags(&tags, cursor)
             .await
             .map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
 
-        let mut rcursor = cursor;
+        // Base the response cursor on the EFFECTIVE cursor used for the query, not
+        // the client's claimed one. When the claimed cursor was reset (legacy µs
+        // cursor, or stranded above the seq high-water after a DB recreation),
+        // `effective_cursor` is 0, so the echoed cursor becomes the max seq we
+        // actually returned — the client's next poll then starts from the true
+        // epoch position and heals, instead of re-sending its stranded cursor and
+        // re-triggering the reset on every request.
+        let mut rcursor = effective_cursor;
         for stored_note in &stored_notes {
             let seq_cursor: u64 = stored_note
                 .seq
