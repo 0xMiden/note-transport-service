@@ -40,11 +40,13 @@ const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
 /// that no longer exists, i.e. the backing DB was recreated. See
 /// [`SqliteDatabase::fetch_notes_by_tags`] for how that stranded cursor is reset.
 ///
-/// Returns `None` when the high-water can't be determined (no note ever inserted,
-/// or the sequence bookkeeping is unavailable). The caller then SKIPS the
-/// stranded-cursor check entirely, leaving the cursor unchanged — fail-safe, so a
-/// transient unavailability of `sqlite_sequence` can never fail a fetch or falsely
-/// reset a live client.
+/// Returns `None` only when the sequence bookkeeping is genuinely unavailable
+/// (e.g. the `sqlite_sequence` table can't be read); the caller then SKIPS the
+/// stranded-cursor check, leaving the cursor unchanged — fail-safe, so a transient
+/// unavailability can never fail a fetch or falsely reset a live client. Note that
+/// a freshly-migrated `notes` table already reports high-water `0` (its
+/// `sqlite_sequence` row exists with value 0), so on an empty DB a positive cursor
+/// is reset to 0 rather than skipped.
 fn high_water_seq(conn: &mut SqliteConnection) -> Option<i64> {
     #[derive(diesel::QueryableByName)]
     struct HighWater {
@@ -148,6 +150,21 @@ impl DatabaseBackend for SqliteDatabase {
             .max_size(max_size)
             .build()
             .map_err(|e| DatabaseError::Pool(format!("Failed to create connection pool: {e}")))?;
+
+        // Eagerly create one connection so the schema migrations run to
+        // completion BEFORE the pool serves concurrent load. Connections are
+        // created lazily and each runs migrations on creation (see
+        // `configure_connection_on_creation`). Without this, a restart
+        // thundering-herd on a fresh volume opens ~16 connections at once, all
+        // racing to run the same `CREATE TABLE` DDL, and hits "disk I/O error"
+        // (there is no happens-before in `Node::init` between the first
+        // migration and the first concurrent request). This warm-up serializes
+        // the first migration; every later connection then finds nothing pending.
+        drop(
+            pool.get().await.map_err(|e| {
+                DatabaseError::Connection(format!("Failed to initialize schema: {e}"))
+            })?,
+        );
 
         Ok(Self { pool, metrics })
     }

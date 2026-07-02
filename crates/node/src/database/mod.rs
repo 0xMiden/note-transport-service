@@ -2,6 +2,9 @@ mod error;
 mod maintenance;
 mod sqlite;
 
+#[cfg(test)]
+mod invariant_tests;
+
 pub use self::error::DatabaseError;
 pub use self::maintenance::DatabaseMaintenance;
 use self::sqlite::SqliteDatabase;
