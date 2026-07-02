@@ -141,6 +141,8 @@ impl NoteStreamerManager {
         for (tag, notes) in tag_notes {
             // Cursor-only heal entries carry no notes; `update_timestamps` has
             // already advanced the stored cursor, and there is nothing to send.
+            // The subscriber's waker stays in `self.wakers` (unconsumed) and is
+            // woken when notes next arrive for the tag, or dropped on disconnect.
             if notes.0.is_empty() {
                 continue;
             }
@@ -327,5 +329,123 @@ impl Drop for Sub {
         }) {
             tracing::error!(subscription_id = %self.id, error = %e, "Streamer remove sub control message sending error");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::database::{Database, DatabaseConfig};
+    use crate::metrics::Metrics;
+    use crate::test_utils::{TAG_LOCAL_ANY, test_note_header_with_tag};
+    use crate::types::StoredNote;
+
+    /// A streaming subscription stranded above the seq high-water (its cursor
+    /// carried over a DB recreation) whose tag has NO notes in the new epoch must
+    /// heal its stored cursor to 0 exactly once — not re-fire the reset (warn +
+    /// metric) on every 500ms tick — and must NOT push an empty update, which
+    /// would deliver `cursor: 0` to the client and regress its position. The
+    /// `forward_updates` empty-skip guard is load-bearing for that last property:
+    /// with a waker registered, removing the guard would deliver the empty batch
+    /// and fail this test.
+    #[tokio::test]
+    async fn test_streaming_heals_stranded_cursor_without_spurious_push() {
+        let db = Arc::new(
+            Database::connect(DatabaseConfig::default(), Metrics::default().db)
+                .await
+                .unwrap(),
+        );
+
+        // A note under a DIFFERENT tag: the shared seq high-water becomes 1,
+        // while the subscribed tag has no notes in this epoch.
+        db.store_note(&StoredNote {
+            header: test_note_header_with_tag(0xc000_0001),
+            details: vec![1],
+            created_at: Utc::now(),
+            seq: 0,
+            after_block_num: None,
+        })
+        .await
+        .unwrap();
+
+        let mut mgr = NoteStreamerManager::new(db);
+
+        // Register a subscriber on TAG_LOCAL_ANY with a stranded shared cursor,
+        // plus a waker so `forward_updates` WOULD deliver if the empty-skip guard
+        // were removed — making the "no spurious push" assertion meaningful.
+        let tag: NoteTag = TAG_LOCAL_ANY.into();
+        let (tx, mut rx) = mpsc::channel::<TransportNotesPg>(4);
+        let mut subs = BTreeMap::new();
+        subs.insert(1u64, SubEntry { tx, created_at: Instant::now() });
+        mgr.tags.insert(tag, TagData { cursor: 10_000, subs });
+        mgr.update_waker(1, Waker::noop().clone());
+
+        // Tick 1: cursor (10_000) is above the high-water (1) → reset →
+        // cursor-only heal entry (empty notes, cursor 0).
+        let updates = mgr.query_updates().await.unwrap();
+        assert_eq!(updates.len(), 1, "stranded empty tag must emit one cursor-only heal");
+        assert!(updates[0].1.0.is_empty(), "heal carries no notes");
+        assert_eq!(updates[0].1.1, 0, "heal cursor is the reset value 0");
+
+        mgr.update_timestamps(&updates);
+        mgr.forward_updates(updates);
+
+        assert_eq!(mgr.tags.get(&tag).unwrap().cursor, 0, "stored cursor healed to 0 exactly once",);
+        assert!(rx.try_recv().is_err(), "no empty update may reach the subscriber");
+
+        // Tick 2: caught-up at 0 — the `effective > 0` guard skips the high-water
+        // check entirely, so no reset and no push. The storm is gone.
+        assert!(
+            mgr.query_updates().await.unwrap().is_empty(),
+            "steady state after heal produces no push (no storm)",
+        );
+    }
+
+    /// A stranded subscription whose tag DOES have notes in the new epoch heals
+    /// and delivers those notes in a single tick: the reset re-scans from 0, the
+    /// recovered notes are forwarded to the subscriber, and the stored cursor
+    /// advances to their max seq (not 0, not the stranded value). Covers the
+    /// heal + non-empty `forward_updates` + waker-consumption path.
+    #[tokio::test]
+    async fn test_streaming_heals_stranded_cursor_and_delivers_notes() {
+        let db = Arc::new(
+            Database::connect(DatabaseConfig::default(), Metrics::default().db)
+                .await
+                .unwrap(),
+        );
+
+        // Two notes on the SUBSCRIBED tag: the high-water becomes 2.
+        for details in [vec![1u8], vec![2u8]] {
+            db.store_note(&StoredNote {
+                header: test_note_header_with_tag(TAG_LOCAL_ANY),
+                details,
+                created_at: Utc::now(),
+                seq: 0,
+                after_block_num: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        let mut mgr = NoteStreamerManager::new(db);
+        let tag: NoteTag = TAG_LOCAL_ANY.into();
+        let (tx, mut rx) = mpsc::channel::<TransportNotesPg>(4);
+        let mut subs = BTreeMap::new();
+        subs.insert(1u64, SubEntry { tx, created_at: Instant::now() });
+        mgr.tags.insert(tag, TagData { cursor: 10_000, subs });
+        mgr.update_waker(1, Waker::noop().clone());
+
+        let updates = mgr.query_updates().await.unwrap();
+        mgr.update_timestamps(&updates);
+        mgr.forward_updates(updates);
+
+        // The subscriber received the recovered notes (heal + delivery)...
+        let (notes, cursor) = rx.try_recv().expect("healed notes must be delivered");
+        assert_eq!(notes.len(), 2, "both new-epoch notes recovered");
+        assert_eq!(cursor, 2, "delivered cursor is the max recovered seq");
+        // ...and the stored cursor advanced to the max seq (not 0, not stranded).
+        assert_eq!(mgr.tags.get(&tag).unwrap().cursor, 2, "stored cursor healed to max seq");
     }
 }

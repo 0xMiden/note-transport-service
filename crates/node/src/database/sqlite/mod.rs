@@ -41,9 +41,10 @@ const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
 /// [`SqliteDatabase::fetch_notes_by_tags`] for how that stranded cursor is reset.
 ///
 /// Returns `None` when the high-water can't be determined (no note ever inserted,
-/// or the sequence bookkeeping is unavailable). Callers MUST then treat no cursor
-/// as stranded — fail-safe, so a fetch can never fail or falsely reset a live
-/// client because of this check.
+/// or the sequence bookkeeping is unavailable). The caller then SKIPS the
+/// stranded-cursor check entirely, leaving the cursor unchanged — fail-safe, so a
+/// transient unavailability of `sqlite_sequence` can never fail a fetch or falsely
+/// reset a live client.
 fn high_water_seq(conn: &mut SqliteConnection) -> Option<i64> {
     #[derive(diesel::QueryableByName)]
     struct HighWater {
@@ -233,6 +234,11 @@ impl DatabaseBackend for SqliteDatabase {
             .transact("fetch notes by tags", move |conn| {
                 use schema::notes::dsl::{notes, seq, tag};
 
+                // Only a non-zero cursor can be stranded. This guard also makes
+                // the heal converge: a reset lands the client (and, on the push
+                // path, the stored subscription cursor) at 0, and cursor 0 never
+                // re-enters this branch — so the reset fires at most once per
+                // stranding event, not every poll.
                 let mut effective = cursor_i64;
                 if effective > 0 {
                     if let Some(high_water) = high_water_seq(conn) {

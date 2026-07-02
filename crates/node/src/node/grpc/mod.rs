@@ -431,4 +431,41 @@ mod tests {
             "response cursor must be the recovered seq (heal), not the stranded 5000 echoed back"
         );
     }
+
+    /// Stranded cursor on a tag with NO matching notes in the new epoch: the
+    /// reset still heals the echoed cursor to 0 (so the client re-scans from the
+    /// start next poll) even though no notes come back — the `rcursor` base must
+    /// be the effective cursor (0), not the stranded value.
+    #[tokio::test]
+    async fn test_fetch_notes_response_cursor_heals_when_no_matching_notes() {
+        use chrono::Utc;
+
+        use crate::test_utils::{TAG_LOCAL_ANY, test_note_header_with_tag};
+        use crate::types::StoredNote;
+
+        let server = test_server().await;
+        // A note under a DIFFERENT tag lifts the high-water to 1; the requested
+        // tag has no notes in this epoch.
+        server
+            .database
+            .store_note(&StoredNote {
+                header: test_note_header_with_tag(0xc000_0001),
+                details: vec![7],
+                created_at: Utc::now(),
+                seq: 0,
+                after_block_num: None,
+            })
+            .await
+            .unwrap();
+
+        let request =
+            tonic::Request::new(FetchNotesRequest { tags: vec![TAG_LOCAL_ANY], cursor: 5_000 });
+        let response = server.fetch_notes(request).await.expect("must succeed").into_inner();
+
+        assert_eq!(response.notes.len(), 0, "requested tag has no notes in the new epoch");
+        assert_eq!(
+            response.cursor, 0,
+            "stranded cursor must heal to 0, not echo the stranded 5000 back, even with no notes"
+        );
+    }
 }
