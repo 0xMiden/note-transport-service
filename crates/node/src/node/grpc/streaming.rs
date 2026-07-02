@@ -392,7 +392,7 @@ mod tests {
         mgr.update_timestamps(&updates);
         mgr.forward_updates(updates);
 
-        assert_eq!(mgr.tags.get(&tag).unwrap().cursor, 0, "stored cursor healed to 0 exactly once",);
+        assert_eq!(mgr.tags.get(&tag).unwrap().cursor, 0, "stored cursor healed to 0 exactly once");
         assert!(rx.try_recv().is_err(), "no empty update may reach the subscriber");
 
         // Tick 2: caught-up at 0 — the `effective > 0` guard skips the high-water
