@@ -22,6 +22,7 @@
 - [Overview](./developer/index.md)
 - [Navigating the codebase](./developer/codebase.md)
 - [Components](./developer/components.md)
+- [Testing](./developer/testing.md)
 
 ---
 
