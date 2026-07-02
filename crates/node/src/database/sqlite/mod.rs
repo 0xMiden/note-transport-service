@@ -236,6 +236,14 @@ impl DatabaseBackend for SqliteDatabase {
                 let mut effective = cursor_i64;
                 if effective > 0 {
                     if let Some(high_water) = high_water_seq(conn) {
+                        // Strict `>` is deliberate: a caught-up client sits at
+                        // `cursor == high_water` and must NOT be reset (that would
+                        // re-deliver the whole epoch every steady-state poll). The
+                        // accepted residual edge is that if a recreated epoch grows
+                        // to exactly the stranded cursor before the client's next
+                        // poll, the reset is skipped and the client misses that
+                        // epoch's `1..=cursor` backlog — a one-insert-wide
+                        // coincidence with bounded impact.
                         if effective > high_water {
                             effective = 0;
                         }

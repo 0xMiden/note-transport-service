@@ -40,6 +40,10 @@ pub trait DatabaseBackend: Send + Sync {
     /// or stranded above the seq high-water), otherwise the requested cursor.
     /// Callers should base their response cursor on this effective value so a
     /// reset heals the client rather than re-triggering every poll.
+    ///
+    /// An empty tag set short-circuits before the stranded-cursor check and
+    /// returns the post-legacy cursor unchanged (there are no notes to deliver,
+    /// so there is nothing to heal).
     async fn fetch_notes_by_tags(
         &self,
         tags: &[NoteTag],

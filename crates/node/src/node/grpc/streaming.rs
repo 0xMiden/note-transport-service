@@ -118,7 +118,16 @@ impl NoteStreamerManager {
             let pnotes = snotes.into_iter().map(TransportNote::from).collect::<Vec<_>>();
             let notespg = (pnotes, cursor);
 
-            if !notespg.0.is_empty() {
+            // Push when there are notes to forward, OR when the cursor changed
+            // with no notes. The latter is a cursor-only heal: a stranded
+            // subscription (cursor above the seq high-water after a DB
+            // recreation) whose tag has no notes in the new epoch resets to
+            // `effective = 0` every tick but, without this, would never persist
+            // that reset — re-firing the reset (and its warn log + metric) on
+            // every 500ms tick. Including it lets `update_timestamps` advance the
+            // stored cursor once; `forward_updates` skips the empty batch so no
+            // empty update reaches subscribers.
+            if !notespg.0.is_empty() || cursor != tag_data.cursor {
                 updates.push((*tag, notespg));
             }
         }
@@ -130,6 +139,11 @@ impl NoteStreamerManager {
         let mut remove_subs = vec![];
         // Forward updates to subs
         for (tag, notes) in tag_notes {
+            // Cursor-only heal entries carry no notes; `update_timestamps` has
+            // already advanced the stored cursor, and there is nothing to send.
+            if notes.0.is_empty() {
+                continue;
+            }
             if let Some(tag_data) = self.tags.get(&tag) {
                 // Wake-up subs with `tag`
                 for (sub_id, sub_entry) in &tag_data.subs {

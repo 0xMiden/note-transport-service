@@ -391,4 +391,44 @@ mod tests {
         assert_eq!(response.notes.len(), 0, "DB is empty, no notes returned");
         assert_eq!(response.cursor, 0);
     }
+
+    /// End-to-end heal: a cursor stranded above the seq high-water (but below the
+    /// legacy threshold) must reset AND the echoed response cursor must be the
+    /// recovered seq — not the stranded value echoed back. This is the actual
+    /// client-healing mechanism; the DB-layer tests only prove `effective == 0`,
+    /// so without this a regression reverting `rcursor = effective_cursor` back
+    /// to `= cursor` would pass every other test while silently re-breaking the
+    /// fix (and re-introducing the analogous latent legacy-cursor bug).
+    #[tokio::test]
+    async fn test_fetch_notes_response_cursor_heals_stranded_client() {
+        use chrono::Utc;
+
+        use crate::test_utils::{TAG_LOCAL_ANY, test_note_header};
+        use crate::types::StoredNote;
+
+        let server = test_server().await;
+        server
+            .database
+            .store_note(&StoredNote {
+                header: test_note_header(),
+                details: vec![9],
+                created_at: Utc::now(),
+                seq: 0,
+                after_block_num: None,
+            })
+            .await
+            .unwrap(); // high-water becomes 1
+
+        // Stranded cross-epoch cursor: far above the high-water (1), far below
+        // the 1e12 legacy threshold.
+        let request =
+            tonic::Request::new(FetchNotesRequest { tags: vec![TAG_LOCAL_ANY], cursor: 5_000 });
+        let response = server.fetch_notes(request).await.expect("must succeed").into_inner();
+
+        assert_eq!(response.notes.len(), 1, "stranded cursor must reset to 0 and recover the note");
+        assert_eq!(
+            response.cursor, 1,
+            "response cursor must be the recovered seq (heal), not the stranded 5000 echoed back"
+        );
+    }
 }
