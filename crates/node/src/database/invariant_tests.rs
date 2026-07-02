@@ -13,14 +13,19 @@
 //! the author imagined. This harness *explores the state space*: it drives
 //! random operation sequences (Layer 1), random concurrent schedules (Layer 2),
 //! and DB-recreation / cleanup edges (Layer 3) against the REAL backend and
-//! asserts the invariant. A fresh bug in this class shows up as a failing seed
-//! that replays deterministically.
+//! asserts the invariant. A fresh bug in this class shows up as a failing seed.
+//!
+//! Determinism note: the seed replays the OPERATION SEQUENCE exactly. Note
+//! identities come from a global RNG and are re-randomized each run, which does
+//! not affect the structural cursor/tag/seq invariants under test (a failure
+//! reproduces from the op sequence regardless of which id bytes are used).
 //!
 //! Every randomized test is SEEDED and prints the seed (and, for Layer 1, the
 //! greedily-minimized failing op sequence) on failure. Tune with env vars:
 //! `NTS_INV_ITERS`, `NTS_INV_LEN`, `NTS_INV_SEED` (Layer 1);
 //! `NTS_INV_CONC_ITERS` (Layer 2). Defaults are CI-fast; raise them for a soak.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -35,7 +40,9 @@ use crate::test_utils::test_note_header_with_tag;
 use crate::types::{NoteTag, StoredNote};
 
 /// An RAII SQLite file path under the system temp dir, removed on drop along
-/// with its `-wal`/`-shm` sidecars. Avoids a `tempfile` dependency.
+/// with its `-wal`/`-shm` sidecars. Avoids a `tempfile` dependency. Cleanup runs
+/// on normal drop and on unwinding panics; only a `panic=abort` profile would
+/// leak the temp file (acceptable for a test-only helper).
 struct TempDbPath {
     path: std::path::PathBuf,
 }
@@ -87,6 +94,28 @@ fn note_id(note: &StoredNote) -> Id {
     note.header.id().as_bytes().to_vec()
 }
 
+/// Short hex prefix of an id, for readable diff messages.
+fn id_hex(id: &Id) -> String {
+    use std::fmt::Write;
+    id.iter().take(4).fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// Number of distinct ids — used to assert exactly-once (no duplicate delivery).
+fn distinct_count(ids: &[Id]) -> usize {
+    let mut v = ids.to_vec();
+    v.sort();
+    v.dedup();
+    v.len()
+}
+
+/// First index at which two ordered id lists differ, if any.
+fn first_diff(a: &[Id], b: &[Id]) -> Option<usize> {
+    (0..a.len().max(b.len())).find(|&k| a.get(k) != b.get(k))
+}
+
 fn mk_note(header: NoteHeader) -> StoredNote {
     StoredNote {
         header,
@@ -105,8 +134,14 @@ async fn fresh_mem_db() -> Database {
 
 /// Fetch the way a real client sees it: the DB returns `(notes, effective)`, and
 /// the gRPC handler echoes `rcursor = max(effective, max returned seq)`. We
-/// replicate that so the drain loop and per-fetch assertions use the same
+/// replicate that formula so the drain loop and per-fetch assertions use the same
 /// client-visible cursor the wallet would store.
+///
+/// This intentionally mirrors `MidenNoteTransport::fetch_notes` in
+/// `node/grpc/mod.rs` rather than calling it (the harness exercises the DB layer
+/// directly); the handler's own rcursor logic is pinned by
+/// `test_fetch_notes_response_cursor_heals_stranded_client`. `filter_map` on the
+/// seq→u64 conversion can't actually drop anything — `seq` is AUTOINCREMENT (≥ 1).
 async fn client_fetch(db: &Database, tags: &[NoteTag], cursor: u64) -> (Vec<StoredNote>, u64) {
     let (notes, effective) =
         db.fetch_notes_by_tags(tags, cursor).await.expect("fetch_notes_by_tags");
@@ -115,11 +150,11 @@ async fn client_fetch(db: &Database, tags: &[NoteTag], cursor: u64) -> (Vec<Stor
     (notes, rcursor)
 }
 
-/// Drain the full backlog for `tags` by paginating from cursor 0, returning the
-/// delivered ids. Bounded to guard against a non-terminating pagination bug
-/// (which is itself a failure the caller should surface).
-async fn drain_all(db: &Database, tags: &[NoteTag]) -> Vec<Id> {
-    let mut cursor = 0u64;
+/// Drain the backlog for `tags` by paginating from `start`, returning the
+/// delivered ids (in delivery order). Bounded to guard against a
+/// non-terminating pagination bug (itself a failure the caller should surface).
+async fn drain_from(db: &Database, tags: &[NoteTag], start: u64) -> Vec<Id> {
+    let mut cursor = start;
     let mut ids = Vec::new();
     for _ in 0..100_000 {
         let (notes, rcursor) = client_fetch(db, tags, cursor).await;
@@ -129,13 +164,23 @@ async fn drain_all(db: &Database, tags: &[NoteTag]) -> Vec<Id> {
         ids.extend(notes.iter().map(note_id));
         if rcursor <= cursor {
             // No forward progress with a non-empty batch: a drain-terminates
-            // violation. Stop so we don't loop forever; the completeness check
-            // will flag the discrepancy.
+            // violation. Emit a diagnostic (so the failure isn't misread as a
+            // plain missing-note bug) and stop so we don't loop forever; the
+            // completeness / duplicate checks surface the resulting discrepancy.
+            eprintln!(
+                "drain-terminates violation: non-empty batch but cursor did not advance \
+                 (cursor={cursor}, rcursor={rcursor})"
+            );
             break;
         }
         cursor = rcursor;
     }
     ids
+}
+
+/// Drain the full backlog for `tags` from cursor 0.
+async fn drain_all(db: &Database, tags: &[NoteTag]) -> Vec<Id> {
+    drain_from(db, tags, 0).await
 }
 
 /// Reference model of the store's INTENDED fetch/cursor semantics. Deliberately
@@ -173,6 +218,10 @@ mod model {
             self.high_water = 0;
         }
 
+        pub fn high_water(&self) -> u64 {
+            self.high_water
+        }
+
         /// The effective cursor after the server's reset rules: legacy µs cursors
         /// (`> 1e12`) and cursors stranded above the high-water reset to 0.
         fn effective(&self, cursor: u64) -> u64 {
@@ -181,6 +230,13 @@ mod model {
             // OR stranded above the current high-water (a regressed seq space
             // after a DB recreation). Both reset reasons collapse to the same
             // effective cursor.
+            //
+            // Coupling note: on an empty DB `high_water == 0`, so this resets any
+            // non-zero cursor — matching the real backend, whose `sqlite_sequence`
+            // row for `notes` reports `0` on a freshly-migrated table (see
+            // `fresh_db_resets_any_positive_cursor`). The backend's `high_water_seq
+            // == None` fail-safe (skip the reset) only fires if the sequence table
+            // is genuinely unreadable, which the model does not represent.
             let legacy = cursor > LEGACY_THRESHOLD;
             let stranded = cursor > 0 && cursor > self.high_water;
             if legacy || stranded { 0 } else { cursor }
@@ -294,11 +350,14 @@ async fn run_sequence(ops: &[Op]) -> Result<(), String> {
                 let real_ids: Vec<Id> = real_notes.iter().map(note_id).collect();
                 let (model_ids, model_cursor) = model.fetch(tags, *cursor);
                 if real_ids != model_ids {
+                    let diff = first_diff(&real_ids, &model_ids).unwrap_or(0);
                     return Err(format!(
                         "op {i} Fetch(tags={tags:?}, cursor={cursor}): backend returned {} ids, \
-                         model {} ids (ordered set mismatch)",
+                         model {} ids; first diff at index {diff}: backend={:?}, model={:?}",
                         real_ids.len(),
-                        model_ids.len()
+                        model_ids.len(),
+                        real_ids.get(diff).map(id_hex),
+                        model_ids.get(diff).map(id_hex),
                     ));
                 }
                 if real_cursor != model_cursor {
@@ -310,6 +369,13 @@ async fn run_sequence(ops: &[Op]) -> Result<(), String> {
             },
             Op::DrainAll { tags } => {
                 let mut real = drain_all(&db, &ntags(tags)).await;
+                if distinct_count(&real) != real.len() {
+                    return Err(format!(
+                        "op {i} DrainAll(tags={tags:?}): duplicate delivery — {} ids drained, {} distinct",
+                        real.len(),
+                        distinct_count(&real)
+                    ));
+                }
                 let mut expected = model.drain_all_ids(tags);
                 real.sort();
                 expected.sort();
@@ -329,8 +395,15 @@ async fn run_sequence(ops: &[Op]) -> Result<(), String> {
     }
 
     // Global invariant: draining every tag from cursor 0 must yield exactly the
-    // present set — nothing lost, nothing permanently invisible.
+    // present set — nothing lost, nothing duplicated, nothing permanently invisible.
     let mut real = drain_all(&db, &ntags(&TAGS)).await;
+    if distinct_count(&real) != real.len() {
+        return Err(format!(
+            "final completeness: duplicate delivery — {} ids drained, {} distinct",
+            real.len(),
+            distinct_count(&real)
+        ));
+    }
     let mut expected = model.drain_all_ids(&TAGS);
     real.sort();
     expected.sort();
@@ -339,6 +412,23 @@ async fn run_sequence(ops: &[Op]) -> Result<(), String> {
             "final completeness: {} notes reachable via drain-from-0, model has {} present",
             real.len(),
             expected.len()
+        ));
+    }
+
+    // Independent stranded-heal oracle (does NOT consult `model.effective`): a
+    // cursor stranded above the high-water must recover exactly the same set as
+    // draining from 0 — i.e. the reset fully heals it. This catches a
+    // stranded-heal regression even if the reference model mirrored the same bug,
+    // and it exercises whatever epoch state the random recreates left behind.
+    let stranded_start = model.high_water() + 1_000_000;
+    let mut stranded = drain_from(&db, &ntags(&TAGS), stranded_start).await;
+    stranded.sort();
+    if stranded != real {
+        return Err(format!(
+            "stranded-heal: drain from stranded cursor {stranded_start} yielded {} ids, \
+             drain from 0 yielded {} — the stranded cursor did not fully heal",
+            stranded.len(),
+            real.len()
         ));
     }
     Ok(())
@@ -390,13 +480,32 @@ async fn model_matches_backend_over_random_sequences() {
     }
 }
 
+/// Arbiter for a disputed review finding: what does the backend actually do with
+/// a positive cursor on a freshly-migrated, never-written table? Empirically its
+/// `sqlite_sequence` row for `notes` reports high-water 0 (not absent), so ANY
+/// positive cursor is stranded-above-high-water and resets to 0 — an empty DB
+/// heals a leftover cursor rather than echoing it back. The reference model
+/// relies on exactly this (it predicts a reset when `high_water == 0`).
+#[tokio::test]
+async fn fresh_db_resets_any_positive_cursor() {
+    let db = fresh_mem_db().await;
+    let (notes, effective) = db
+        .fetch_notes_by_tags(&[TAGS[0].into()], 5_000)
+        .await
+        .expect("fetch on fresh db");
+    assert!(notes.is_empty(), "a fresh DB has no notes");
+    assert_eq!(effective, 0, "a positive cursor on an empty DB resets to 0 (high-water is 0)");
+}
+
 /// Store `NOTES_PER_WRITER` notes per writer concurrently, with concurrent
 /// fetchers interleaving reads, then assert a final drain-from-0 delivers every
 /// stored note exactly once. Panics with the seed on violation.
 async fn concurrent_completeness_once(seed: u64, file_backed: bool) {
-    const WRITERS: usize = 8;
-    const NOTES_PER_WRITER: usize = 40;
-    const FETCHERS: usize = 3;
+    // Default burst 8×80 = 640 > BATCH(500), so the drains paginate across pages
+    // under live inserts (where cross-page cursor-advance races would show).
+    let writers_n = env_u64("NTS_INV_CONC_WRITERS", 8) as usize;
+    let notes_per_writer = env_u64("NTS_INV_CONC_NOTES", 80) as usize;
+    let fetchers_n = 3;
 
     let tmp = if file_backed { Some(TempDbPath::new(seed)) } else { None };
     let db = Arc::new(match &tmp {
@@ -404,38 +513,46 @@ async fn concurrent_completeness_once(seed: u64, file_backed: bool) {
         None => fresh_mem_db().await,
     });
 
-    // Warm up one connection so migrations + WAL setup run ONCE before the burst.
-    // Without this, a fresh file-backed DB has ~16 pool connections racing to run
-    // migration DDL simultaneously ("disk I/O error"). In production the DB is
-    // already initialized before concurrent load arrives; this reproduces that
-    // ordering rather than an artificial cold-start stampede.
-    db.get_stats().await.expect("db warm-up");
+    // No test-level warm-up: `SqliteDatabase::connect` now eagerly runs the
+    // schema migration on one connection before returning, so a burst of ~16
+    // fresh connections no longer stampedes migration DDL. This test exercises
+    // that guarantee rather than papering over the cold-start race.
 
-    // Concurrent fetchers interleave reads with the writes (results ignored —
-    // the final drain is the source of truth). They exercise the single-snapshot
-    // multi-tag read path against in-flight inserts.
+    // Concurrent fetchers are an ORACLE, not decoration: each drain pass must be
+    // internally duplicate-free (one pass advances a strictly-increasing cursor,
+    // so it can't return a note twice even under concurrent inserts), and every
+    // id a fetcher observes must be a real stored id (checked against `expected`
+    // after the join). Their panics are propagated.
     let stop = Arc::new(AtomicBool::new(false));
     let mut fetchers = Vec::new();
-    for _ in 0..FETCHERS {
+    for _ in 0..fetchers_n {
         let db = db.clone();
         let stop = stop.clone();
         fetchers.push(tokio::spawn(async move {
             let all = ntags(&TAGS);
+            let mut observed: BTreeSet<Id> = BTreeSet::new();
             while !stop.load(Ordering::Relaxed) {
-                let _ = drain_all(&db, &all).await;
+                let pass = drain_all(&db, &all).await;
+                assert_eq!(
+                    distinct_count(&pass),
+                    pass.len(),
+                    "duplicate id within a single concurrent drain pass"
+                );
+                observed.extend(pass);
                 tokio::task::yield_now().await;
             }
+            observed
         }));
     }
 
     let mut writers = Vec::new();
-    for w in 0..WRITERS {
+    for w in 0..writers_n {
         let db = db.clone();
         writers.push(tokio::spawn(async move {
             let mut rng =
                 StdRng::seed_from_u64(seed ^ (w as u64).wrapping_mul(0x0123_4567_89ab_cdef));
-            let mut ids = Vec::with_capacity(NOTES_PER_WRITER);
-            for _ in 0..NOTES_PER_WRITER {
+            let mut ids = Vec::with_capacity(notes_per_writer);
+            for _ in 0..notes_per_writer {
                 let tag = TAGS[rng.random_range(0..TAGS.len())];
                 let header = test_note_header_with_tag(tag);
                 ids.push(header.id().as_bytes().to_vec());
@@ -450,21 +567,29 @@ async fn concurrent_completeness_once(seed: u64, file_backed: bool) {
         expected.extend(handle.await.expect("writer join"));
     }
     stop.store(true, Ordering::Relaxed);
+
+    // Propagate fetcher panics (an intra-pass duplicate, a read/deserialize
+    // panic) and collect every id any fetcher observed.
+    let mut reader_ids: BTreeSet<Id> = BTreeSet::new();
     for handle in fetchers {
-        let _ = handle.await;
+        reader_ids.extend(handle.await.expect("fetcher join"));
+    }
+    let expected_set: BTreeSet<&Id> = expected.iter().collect();
+    for id in &reader_ids {
+        assert!(
+            expected_set.contains(id),
+            "concurrent read surfaced an id that was never stored \
+             (seed={seed:#018x}, file_backed={file_backed})"
+        );
     }
 
+    // Final quiescent drain: every stored note delivered exactly once.
     let mut delivered = drain_all(&db, &ntags(&TAGS)).await;
-
-    let mut deduped = delivered.clone();
-    deduped.sort();
-    deduped.dedup();
     assert_eq!(
-        deduped.len(),
+        distinct_count(&delivered),
         delivered.len(),
         "duplicate delivery under concurrency (seed={seed:#018x}, file_backed={file_backed})"
     );
-
     expected.sort();
     delivered.sort();
     assert_eq!(
