@@ -105,6 +105,7 @@ Categorize every finding:
 5. If uncertain about something, say so and suggest investigation rather than guessing
 6. Be direct. "This will panic when the vec is empty" not "this might possibly be a concern"
 7. New code without tests is always a finding
+8. If a section has no findings, write `None.` as plain text on its own line - never as a bullet item. Bullets are reserved for actual findings (tooling counts them)
 
 **Findings (Critical, Important) block the merge.** Every issue must be addressed before pushing.
 
