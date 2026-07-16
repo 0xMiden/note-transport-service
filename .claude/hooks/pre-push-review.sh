@@ -134,6 +134,20 @@ count_blocking_findings() {
       }
       next
     }
+    # The agent prompts instruct reviewers to mark empty sections with a
+    # plain, unbulleted "None." (which this counter naturally ignores).
+    # As defense-in-depth, also skip bulleted empty-section markers the
+    # agents may still emit ("- None.", "- **none found**", "- No issues.").
+    # The pattern is anchored to end-of-line and the "no <noun>" nouns are
+    # deliberately narrow: anything with trailing prose or another noun
+    # ("- None of the inputs are validated", "- No validation of X") must
+    # still count. Over-counting blocks a clean push (annoying but safe);
+    # under-counting lets a real finding through. Keep it narrow.
+    in_block {
+      s = tolower($0)
+      gsub(/\*\*/, "", s)
+      if (s ~ /^[[:space:]]*[-*][[:space:]]+(none|no (issues|findings|concerns|warnings))( (found|identified|noted|detected|observed|proven|confirmed))?[.!]?[[:space:]]*$/) next
+    }
     in_block && /^[[:space:]]*[-*][[:space:]]+./ { count++ }
     END { print count }
   ' "$1"

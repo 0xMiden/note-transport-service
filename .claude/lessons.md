@@ -30,7 +30,11 @@ _(no entries yet)_
 ## Testing
 _What to test, how to test, fixtures, regression patterns, coverage gaps._
 
-_(no entries yet)_
+- **No cross-version compatibility guarantees** (2026-07-16): the chain is
+  pre-mainnet and will be wiped, so stored data and wire formats do not need
+  to survive protocol bumps. Don't add version-pinned serialization fixtures,
+  migration paths, or compat tests when bumping miden-protocol - and push back
+  when an automated reviewer asks for them. **Keep as lesson.**
 
 ## Security & Safety
 _Validation, auth, data handling, error paths, panics, resource limits._
@@ -40,4 +44,11 @@ _(no entries yet)_
 ## Process
 _Workflow, commits, PRs, CI, review etiquette, branch naming._
 
-_(no entries yet)_
+- **Never chain `git commit` with `git push` in one command** (2026-07-16): the
+  pre-push review hook fires before the Bash command runs and blocks the whole
+  command, so a blocked `git commit && git push` never executes the commit
+  either. A later `--amend` then rewrites the wrong commit. Commit and push in
+  separate commands, and after any blocked push re-check `git log` before
+  amending. Note the hook's `SKIP_PRE_PUSH=1` escape hatch cannot be triggered
+  from within a Claude session (the env prefix never reaches the hook process);
+  only the user can bypass, from their own terminal. **Keep as lesson.**
