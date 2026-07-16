@@ -4,7 +4,7 @@ The Miden Transport Service currently can only be installed from source using th
 
 ## Install using `cargo`
 
-Install Rust version **1.87** or greater using the official Rust installation
+Install Rust version **1.96.1** or greater using the official Rust installation
 [instructions](https://www.rust-lang.org/tools/install).
 
 Depending on the platform, you may need to install additional libraries. For example, on Ubuntu 22.04 the following
