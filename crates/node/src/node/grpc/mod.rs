@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use miden_note_transport_proto::FILE_DESCRIPTOR_SET;
 use miden_note_transport_proto::miden_note_transport::miden_note_transport_server::MidenNoteTransportServer;
 use miden_note_transport_proto::miden_note_transport::{
     FetchNotesRequest,
@@ -99,6 +100,14 @@ impl GrpcServer {
         let (health_reporter, health_svc) = tonic_health::server::health_reporter();
         health_reporter.set_serving::<MidenNoteTransportServer<Self>>().await;
 
+        let reflection_svc = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+            .build_v1()
+            .map_err(|e| {
+                crate::Error::Internal(format!("Failed to build reflection service: {e}"))
+            })?;
+
         let addr = format!("{}:{}", self.config.host, self.config.port)
             .parse::<SocketAddr>()
             .map_err(|e| crate::Error::Internal(format!("Invalid address: {e}")))?;
@@ -112,6 +121,7 @@ impl GrpcServer {
             .layer(GlobalConcurrencyLimitLayer::new(self.config.max_connections))
             .layer(TimeoutLayer::new(Duration::from_secs(self.config.request_timeout as u64)))
             .add_service(health_svc)
+            .add_service(reflection_svc)
             .add_service(self.into_service())
             .serve(addr)
             .await

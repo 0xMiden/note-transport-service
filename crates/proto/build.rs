@@ -3,40 +3,31 @@ use std::path::PathBuf;
 
 use fs_err as fs;
 use miette::{Context, IntoDiagnostic};
-use protox::prost::Message;
+use prost::Message;
 
-const MNT_PROTO: &str = "miden_note_transport.proto";
 const MNT_DESCRIPTOR: &str = "miden_note_transport_file_descriptor.bin";
 
-/// Generates Rust protobuf bindings from .proto files.
+/// Writes the API descriptor to `OUT_DIR` and optionally regenerates the Rust bindings.
 ///
-/// This is done only if `BUILD_PROTO` environment variable is set to `1` to avoid running the
-/// script on crates.io where repo-level .proto files are not available.
+/// Bindings are regenerated only if `BUILD_PROTO` is set to `1`; published builds use the
+/// descriptor supplied by the proto-build crate and the committed Rust bindings.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo::rerun-if-changed=../../proto/proto");
     println!("cargo::rerun-if-env-changed=BUILD_PROTO");
+
+    let out =
+        env::var("OUT_DIR").expect("env::OUT_DIR is always set in build.rs when used with cargo");
+    let descriptor = miden_note_transport_proto_build::mnt_api_descriptor();
+    let descriptor_path = PathBuf::from(out).join(MNT_DESCRIPTOR);
+    fs::write(descriptor_path, descriptor.encode_to_vec())
+        .into_diagnostic()
+        .wrap_err("writing mnt file descriptor")?;
 
     if env::var("BUILD_PROTO").as_deref() != Ok("1") {
         return Ok(());
     }
 
-    let out =
-        env::var("OUT_DIR").expect("env::OUT_DIR is always set in build.rs when used with cargo");
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
-    let proto_dir = workspace_root.join("proto").join("proto");
-    let includes = &[proto_dir];
-
-    let mnt_file_descriptor = protox::compile([MNT_PROTO], includes)?;
-    let mnt_path = PathBuf::from(&out).join(MNT_DESCRIPTOR);
-    fs::write(&mnt_path, mnt_file_descriptor.encode_to_vec())
-        .into_diagnostic()
-        .wrap_err("writing mnt file descriptor")?;
-
     // Generate the Rust bindings
-    let descriptor = mnt_file_descriptor;
-
     tonic_prost_build::configure()
         .out_dir("src/generated")
         .build_server(true)
@@ -60,7 +51,10 @@ fn generate_mod_rs(directory: impl AsRef<std::path::Path>) -> std::io::Result<()
     for entry in fs::read_dir(directory.as_ref())? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() && path.file_name().unwrap() != "mod.rs" {
+        if path.is_file()
+            && path.extension().is_some_and(|extension| extension == "rs")
+            && path.file_name().unwrap() != "mod.rs"
+        {
             let file_stem = path
                 .file_stem()
                 .and_then(|f| f.to_str())

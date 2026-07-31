@@ -1836,6 +1836,7 @@ dependencies = [
  "tokio",
  "tonic 0.14.5",
  "tonic-health",
+ "tonic-reflection",
  "tonic-web",
  "tower",
  "tower-http",
@@ -1859,10 +1860,10 @@ name = "miden-note-transport-proto"
 version = "0.5.0-alpha.1"
 dependencies = [
  "fs-err",
+ "miden-note-transport-proto-build",
  "miette",
  "prost 0.14.3",
  "prost-types",
- "protox",
  "tonic 0.14.5",
  "tonic-prost",
  "tonic-prost-build",
@@ -3909,6 +3910,20 @@ dependencies = [
  "syn 2.0.117",
  "tempfile",
  "tonic-build",
+]
+
+[[package]]
+name = "tonic-reflection"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaf0685a51e6d02b502ba0764002e766b7f3042aed13d9234925b6ffbfa3fca7"
+dependencies = [
+ "prost 0.14.3",
+ "prost-types",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.14.5",
+ "tonic-prost",
 ]
 
 [[package]]
