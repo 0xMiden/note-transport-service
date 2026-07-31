@@ -1,0 +1,47 @@
+name: Docker Build Check
+
+on:
+  push:
+    branches: [main, "release/v*"]
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  docker-build:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: warp-ubuntu-latest-x64-8x
+    name: Build Note Transport Service
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Prepare image metadata
+        id: metadata
+        run: |
+          echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        uses: WarpBuilds/build-push-action@ec038a9f4b87a7c7ccb50ac7a26a90d46a610a81 # v6.0.9
+        with:
+          context: .
+          push: false
+          file: ./bin/node/docker/Dockerfile
+          platforms: ${{ env.DOCKER_PLATFORMS }}
+          profile-name: ${{ vars.WARPBUILD_DOCKER_BUILDER_PROFILE }}
+          pull: true
+          build-args: |
+            CREATED=${{ steps.metadata.outputs.created }}
+            VERSION=${{ steps.metadata.outputs.version }}
+            COMMIT=${{ steps.metadata.outputs.commit }}
