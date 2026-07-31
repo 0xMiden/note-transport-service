@@ -53,7 +53,7 @@ impl DatabaseMaintenance {
 
         timer.finish("ok");
 
-        sleep(Duration::from_secs(600)).await;
+        sleep(Duration::from_mins(10)).await;
 
         Ok(())
     }
@@ -122,7 +122,7 @@ mod tests {
 
         let db = Arc::new(Database::connect(config.clone(), Metrics::default().db).await.unwrap());
         db.store_note(&note_at(Duration::from_secs(30))).await.unwrap();
-        db.store_note(&note_at(Duration::from_secs(3600 * 26))).await.unwrap();
+        db.store_note(&note_at(Duration::from_hours(26))).await.unwrap();
 
         let maintenance = DatabaseMaintenance::new(db.clone(), config, Metrics::default().db);
         tokio::spawn(maintenance.entrypoint());

@@ -101,6 +101,8 @@ After both personas report:
 
 **All critical or warning findings block the merge.** Every issue must be addressed before pushing.
 
+If a section has no findings, write `None.` as plain text on its own line - never as a bullet item. Bullets are reserved for actual findings (tooling counts them).
+
 **Verdicts:**
 - **BLOCK** - Any findings at severity levels Critical or Warning. Do not merge until addressed.
 - **CLEAN** - Zero critical or warning findings. Safe to merge.
