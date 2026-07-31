@@ -9,7 +9,7 @@ To build from source, run
 cargo build --release --locked
 ```
 
-The binary will be available on `./target/release/miden-note-transport-node-bin`.
+The binary will be available on `./target/release/miden-note-transport-node`.
 
 ## Docker setup
 

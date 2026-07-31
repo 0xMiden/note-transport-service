@@ -18,16 +18,16 @@ Then use `cargo` to compile the node from the source code:
 
 ```sh
 # Install latest version
-cargo install --locked --git https://github.com/0xMiden/note-transport-service miden-note-transport-node-bin
+cargo install --locked --git https://github.com/0xMiden/note-transport-service miden-note-transport-node
 
 # Install from a specific branch
-cargo install --locked --git https://github.com/0xMiden/note-transport-service miden-note-transport-node-bin --branch <branch>
+cargo install --locked --git https://github.com/0xMiden/note-transport-service miden-note-transport-node --branch <branch>
 
 # Install a specific tag
-cargo install --locked --git https://github.com/0xMiden/note-transport-service miden-note-transport-node-bin --tag <tag>
+cargo install --locked --git https://github.com/0xMiden/note-transport-service miden-note-transport-node --tag <tag>
 
 # Install a specific git revision
-cargo install --locked --git https://github.com/0xMiden/note-transport-service miden-note-transport-node-bin --rev <git-sha>
+cargo install --locked --git https://github.com/0xMiden/note-transport-service miden-note-transport-node --rev <git-sha>
 ```
 
 More information on the various `cargo install` options can be found

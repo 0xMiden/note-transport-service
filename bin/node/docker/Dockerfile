@@ -27,7 +27,7 @@ RUN apt-get update && \
     sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /usr/local/cargo/bin/miden-note-transport-node-bin /usr/local/bin/miden-note-transport-node-bin
+COPY --from=builder /usr/local/cargo/bin/miden-note-transport-node /usr/local/bin/miden-note-transport-node
 
 LABEL org.opencontainers.image.authors=devops@miden.team \
     org.opencontainers.image.url=https://0xMiden.github.io/ \
@@ -46,4 +46,4 @@ LABEL org.opencontainers.image.created=$CREATED \
 # Expose port
 EXPOSE 57292
 
-CMD ["miden-note-transport-node-bin", "--host", "0.0.0.0"]
+CMD ["miden-note-transport-node", "--host", "0.0.0.0"]
