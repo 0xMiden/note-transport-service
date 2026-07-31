@@ -15,20 +15,20 @@ From the repository root:
 cargo install --path bin/node --locked
 ```
 
-This installs the `miden-note-transport-node-bin` binary.
+This installs the `miden-note-transport-node` binary.
 
 ## Run the node
 
 The default configuration binds to localhost and stores notes in an in-memory SQLite database:
 
 ```bash
-miden-note-transport-node-bin
+miden-note-transport-node
 ```
 
 For a reachable node with persistent storage:
 
 ```bash
-miden-note-transport-node-bin \
+miden-note-transport-node \
   --host 0.0.0.0 \
   --port 57292 \
   --database-url /var/lib/miden-note-transport/node.db \
@@ -67,7 +67,7 @@ OTEL_ENABLED=true \
 OTEL_TRACES_ENDPOINT=http://otel-collector:4317 \
 JSON_LOGGING=true \
 RUST_LOG=INFO \
-miden-note-transport-node-bin --host 0.0.0.0 --database-url /var/lib/miden-note-transport/node.db
+miden-note-transport-node --host 0.0.0.0 --database-url /var/lib/miden-note-transport/node.db
 ```
 
 ## Docker Compose
