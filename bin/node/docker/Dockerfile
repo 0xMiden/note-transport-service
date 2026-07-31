@@ -1,5 +1,5 @@
 # Miden Note Transport Node
-FROM rust:1.90-slim-bookworm as builder
+FROM rust:1.96-slim-bookworm as builder
 
 
 
