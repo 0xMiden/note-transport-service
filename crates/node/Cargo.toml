@@ -28,12 +28,13 @@ miden-note-transport-proto = { workspace = true }
 miden-protocol = { features = ["testing"], workspace = true }
 
 # gRPC server and client
-tokio        = { workspace = true }
-tonic        = { default-features = true, workspace = true }
-tonic-health = { workspace = true }
-tonic-web    = { workspace = true }
-tower        = { features = ["timeout"], workspace = true }
-tower-http   = { features = ["cors"], workspace = true }
+tokio            = { workspace = true }
+tonic            = { default-features = true, workspace = true }
+tonic-health     = { workspace = true }
+tonic-reflection = { workspace = true }
+tonic-web        = { workspace = true }
+tower            = { features = ["timeout"], workspace = true }
+tower-http       = { features = ["cors"], workspace = true }
 
 # Protobuf
 prost-types = { workspace = true }

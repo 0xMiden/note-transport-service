@@ -5,6 +5,10 @@
 #[rustfmt::skip]
 pub mod generated;
 
+/// Encoded Protobuf file descriptor set for the Miden Note Transport API.
+pub const FILE_DESCRIPTOR_SET: &[u8] =
+    tonic::include_file_descriptor_set!("miden_note_transport_file_descriptor");
+
 // RE-EXPORTS
 // ================================================================================================
 
