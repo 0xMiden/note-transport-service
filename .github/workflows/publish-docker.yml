@@ -1,0 +1,65 @@
+name: Publish Docker image
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: "${{ github.workflow }} @ ${{ github.ref }}"
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  DOCKER_PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  publish-docker:
+    name: Publish Docker image
+    runs-on: warp-ubuntu-latest-x64-8x
+    if: ${{ github.repository_owner == '0xMiden' }}
+    environment: publish-docker
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+      attestations: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image metadata
+        id: metadata
+        run: |
+          echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: WarpBuilds/build-push-action@ec038a9f4b87a7c7ccb50ac7a26a90d46a610a81 # v6.0.9
+        with:
+          context: .
+          push: true
+          file: ./bin/node/docker/Dockerfile
+          platforms: ${{ env.DOCKER_PLATFORMS }}
+          profile-name: ${{ vars.WARPBUILD_DOCKER_BUILDER_PROFILE }}
+          pull: false
+          build-args: |
+            CREATED=${{ steps.metadata.outputs.created }}
+            VERSION=${{ steps.metadata.outputs.version }}
+            COMMIT=${{ steps.metadata.outputs.commit }}
+          tags: ${{ env.REGISTRY }}/0xmiden/miden-note-transport:${{ github.ref_name }}
