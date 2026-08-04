@@ -80,7 +80,7 @@ The OpenTelemetry trace and metrics exporters are enabled by setting `OTEL_ENABL
 ```sh
 OTEL_ENABLED=true \
 OTEL_TRACES_ENDPOINT=http://localhost:4317 \
-miden-note-transport-node-bin
+miden-note-transport-node
 ```
 
 Further exporter behaviour can be configured using the standard OpenTelemetry environment variables as specified in the

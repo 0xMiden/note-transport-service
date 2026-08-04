@@ -11,6 +11,10 @@ repository.workspace   = true
 rust-version.workspace = true
 version.workspace      = true
 
+[[bin]]
+name = "miden-note-transport-node"
+path = "src/main.rs"
+
 [lints]
 workspace = true
 
