@@ -31,6 +31,12 @@ Skip the changelog only when the PR contains no runtime-affecting changes
 (docs, CI, tooling, tests). In that case the hook will tell you to apply the
 `no changelog` label instead.
 
+## Unreleased
+
+### Changes
+
+- Removed support for in-memory databases. The --database-url CLI option is now required, the service won't start without explicitly specifying the database file path ([#113](https://github.com/0xMiden/note-transport-service/pull/113)).
+
 ## v0.4.1 (2026-06-17)
 
 ### Features
