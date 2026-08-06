@@ -50,6 +50,7 @@ rand = { version = "0.9" }
 serde = { features = ["derive"], version = "1.0" }
 serde_json = { version = "1.0" }
 serial_test = { version = "3.2" }
+tempfile = { version = "3" }
 thiserror = { default-features = false, version = "2.0" }
 tokio = { features = ["macros", "net", "rt-multi-thread"], version = "1.48" }
 tonic = { default-features = false, features = ["codegen", "transport"], version = "0.14" }

@@ -18,7 +18,7 @@ struct Args {
     port: u16,
 
     /// Database URL
-    #[arg(long, default_value = ":memory:")]
+    #[arg(long)]
     database_url: String,
 
     /// Retention period in days
@@ -81,4 +81,20 @@ async fn main() -> Result<()> {
     node.entrypoint().await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::error::ErrorKind;
+
+    use super::*;
+
+    #[test]
+    fn database_url_is_required() {
+        let Err(error) = Args::try_parse_from(["miden-note-transport-node"]) else {
+            panic!("database URL should be required");
+        };
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
 }

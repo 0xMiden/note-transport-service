@@ -1,10 +1,9 @@
-//! A minimal connection manager wrapper
-//!
-//! Only required to setup connection parameters, specifically `WAL`.
+//! A minimal connection manager wrapper for per-connection SQLite parameters.
 
 use deadpool_sync::InteractError;
 use diesel::prelude::*;
 
+use crate::database::DatabaseError;
 use crate::database::sqlite::migrations;
 
 /// Connection manager error types
@@ -80,13 +79,6 @@ impl deadpool::managed::Manager for ConnectionManager {
 pub fn configure_connection_on_creation(
     conn: &mut SqliteConnection,
 ) -> Result<(), ConnectionManagerError> {
-    // Enable the WAL mode. This allows concurrent reads while the transaction is being written,
-    // this is required for proper synchronization of the servers in-memory and on-disk
-    // representations (see [State::apply_block])
-    diesel::sql_query("PRAGMA journal_mode=WAL")
-        .execute(conn)
-        .map_err(ConnectionManagerError::ConnectionParamSetup)?;
-
     // Enable foreign key checks.
     diesel::sql_query("PRAGMA foreign_keys=ON")
         .execute(conn)
@@ -97,13 +89,16 @@ pub fn configure_connection_on_creation(
         .execute(conn)
         .map_err(ConnectionManagerError::ConnectionParamSetup)?;
 
-    // Apply migrations on each connection to ensure schema is up to date
-    migrations::apply_migrations(conn).map_err(|e| {
-        ConnectionManagerError::ConnectionParamSetup(diesel::result::Error::DatabaseError(
-            diesel::result::DatabaseErrorKind::UnableToSendCommand,
-            Box::new(format!("Migration failed: {e}")),
-        ))
-    })?;
-
     Ok(())
+}
+
+/// Initializes settings and schema shared by all connections to a database file.
+pub fn initialize_database(conn: &mut SqliteConnection) -> Result<(), DatabaseError> {
+    // WAL mode is persistent for the database file and must be enabled once, before the pool can
+    // create connections concurrently.
+    diesel::sql_query("PRAGMA journal_mode=WAL")
+        .execute(conn)
+        .map_err(|e| DatabaseError::Configuration(format!("Failed to enable WAL mode: {e}")))?;
+
+    migrations::apply_migrations(conn)
 }
