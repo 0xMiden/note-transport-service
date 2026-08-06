@@ -64,18 +64,6 @@ pub struct DatabaseConfig {
     pub retention_days: u32,
 }
 
-/// Default path of the SQLite database file.
-pub const DEFAULT_DATABASE_URL: &str = "mtln.db";
-
-impl Default for DatabaseConfig {
-    fn default() -> Self {
-        Self {
-            url: DEFAULT_DATABASE_URL.to_string(),
-            retention_days: 30,
-        }
-    }
-}
-
 impl Database {
     /// Connect to a database (with `SQLite` backend)
     pub async fn connect(
@@ -146,20 +134,12 @@ mod tests {
         (database, temp_dir)
     }
 
-    #[test]
-    fn test_default_database_is_file_backed() {
-        assert_eq!(DatabaseConfig::default().url, DEFAULT_DATABASE_URL);
-    }
-
     #[tokio::test]
     async fn test_in_memory_databases_are_rejected() {
         for url in [":memory:", "file::memory:?cache=shared", "file:notes?mode=memory&cache=shared"]
         {
             let result = Database::connect(
-                DatabaseConfig {
-                    url: url.to_string(),
-                    ..Default::default()
-                },
+                DatabaseConfig { url: url.to_string(), retention_days: 30 },
                 Metrics::default().db,
             )
             .await;

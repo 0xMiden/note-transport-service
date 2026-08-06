@@ -24,7 +24,7 @@ pub struct Node {
 }
 
 /// Node configuration
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct NodeConfig {
     /// gRPC server configuration
     pub grpc: GrpcServerConfig,

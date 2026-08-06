@@ -19,10 +19,10 @@ This installs the `miden-note-transport-node` binary.
 
 ## Run the node
 
-The default configuration binds to localhost and stores notes in `mtln.db`:
+The database file path is required:
 
 ```bash
-miden-note-transport-node
+miden-note-transport-node --database-url mtln.db
 ```
 
 For a reachable node with persistent storage:
@@ -41,7 +41,7 @@ miden-note-transport-node \
 | --- | --- | --- |
 | `--host` | `127.0.0.1` | Address to bind to. |
 | `--port` | `57292` | gRPC port. |
-| `--database-url` | `mtln.db` | SQLite database file path. |
+| `--database-url` | Required | SQLite database file path. |
 | `--retention-days` | `30` | How long to retain notes before cleanup. |
 | `--max-note-size` | `512000` | Maximum note details size in bytes. |
 | `--max-connections` | `4096` | Maximum concurrent gRPC connections. |
@@ -111,7 +111,7 @@ The note transport node exposes gRPC health through the same gRPC server, not a 
 
 ## Database behavior
 
-The node only supports file-backed SQLite databases. The default `mtln.db` path is relative to the node's working directory; use an absolute path for predictable production deployments.
+The node only supports file-backed SQLite databases and requires `--database-url` at startup. Relative paths are resolved from the node's working directory; use an absolute path for predictable production deployments.
 
 The node runs embedded migrations at startup. The current schema stores note IDs with a uniqueness constraint and uses a monotonic `seq` column for pagination.
 

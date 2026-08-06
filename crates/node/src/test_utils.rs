@@ -20,7 +20,7 @@ use crate::database::DatabaseConfig;
 pub fn temp_database_config() -> (DatabaseConfig, tempfile::TempDir) {
     let temp_dir = tempfile::tempdir().expect("failed to create temporary database directory");
     let url = temp_dir.path().join("test.db").to_string_lossy().into_owned();
-    (DatabaseConfig { url, ..Default::default() }, temp_dir)
+    (DatabaseConfig { url, retention_days: 30 }, temp_dir)
 }
 
 /// Generate a random [`NoteDetailsCommitment`]
