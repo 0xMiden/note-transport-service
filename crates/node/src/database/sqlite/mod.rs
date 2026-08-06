@@ -31,6 +31,16 @@ pub(crate) const FETCH_NOTES_BATCH_SIZE: i64 = 500;
 /// and two orders of magnitude below any microsecond timestamp this decade.
 const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
 
+fn is_in_memory_url(url: &str) -> bool {
+    url == ":memory:"
+        || url.starts_with("file::memory:")
+        || url.strip_prefix("file:").is_some_and(|uri| {
+            uri.split_once('?').is_some_and(|(_, query)| {
+                query.split('&').any(|parameter| parameter.eq_ignore_ascii_case("mode=memory"))
+            })
+        })
+}
+
 /// `SQLite` implementation of the database backend
 pub struct SqliteDatabase {
     pool: deadpool_diesel::Pool<ConnectionManager, deadpool::managed::Object<ConnectionManager>>,
@@ -83,34 +93,33 @@ impl DatabaseBackend for SqliteDatabase {
         config: DatabaseConfig,
         metrics: MetricsDatabase,
     ) -> Result<Self, DatabaseError> {
-        if !std::path::Path::new(&config.url).exists() && !config.url.contains(":memory:") {
+        if is_in_memory_url(&config.url) {
+            return Err(DatabaseError::Configuration(
+                "SQLite in-memory databases are not supported; provide a database file path"
+                    .to_string(),
+            ));
+        }
+
+        if !std::path::Path::new(&config.url).exists() {
             std::fs::File::create(&config.url).map_err(|e| {
                 DatabaseError::Configuration(format!("Failed to create database file: {e}"))
             })?;
         }
 
-        // SQLite `:memory:` DBs are per-connection-isolated — two connections
-        // pointing at `:memory:` see two different databases. With a pool of N
-        // connections, writes splinter across N isolated DBs and most reads
-        // return a partial view, which silently loses note data under load.
-        //
-        // Two ways to fix for an in-memory DB:
-        //   1. `file::memory:?cache=shared` — SQLite URI syntax that makes all connections share
-        //      the SAME in-memory DB via shared cache.
-        //   2. Pool with `max_size=1` so only one connection exists.
-        //
-        // We pick #2 for simplicity and portability (URI mode requires the
-        // `SQLITE_OPEN_URI` flag to be set on connection open, which is not the
-        // driver default). For file-backed URLs, a large pool is appropriate
-        // since all connections open the same file.
-        let is_in_memory = config.url == ":memory:" || config.url.starts_with("file::memory:");
-        let max_size = if is_in_memory { 1 } else { 16 };
-
         let manager = ConnectionManager::new(&config.url);
         let pool = deadpool_diesel::Pool::builder(manager)
-            .max_size(max_size)
+            .max_size(16)
             .build()
             .map_err(|e| DatabaseError::Pool(format!("Failed to create connection pool: {e}")))?;
+
+        // Initialize database-wide settings and migrations before exposing the pool. Otherwise,
+        // concurrent first requests can race while lazily creating connections.
+        let conn: deadpool::managed::Object<ConnectionManager> = pool.get().await.map_err(|e| {
+            DatabaseError::Connection(format!("Failed to get initialization connection: {e}"))
+        })?;
+        conn.interact(connection_manager::initialize_database).await.map_err(|e| {
+            DatabaseError::Connection(format!("Failed to initialize database: {e}"))
+        })??;
 
         Ok(Self { pool, metrics })
     }

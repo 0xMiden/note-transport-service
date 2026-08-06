@@ -12,6 +12,17 @@ use miden_protocol::testing::account_id::ACCOUNT_ID_MAX_ZEROES;
 use miden_protocol::{Felt, Word};
 use rand::Rng;
 
+#[cfg(test)]
+use crate::database::DatabaseConfig;
+
+/// Creates a database configuration backed by a temporary SQLite file.
+#[cfg(test)]
+pub fn temp_database_config() -> (DatabaseConfig, tempfile::TempDir) {
+    let temp_dir = tempfile::tempdir().expect("failed to create temporary database directory");
+    let url = temp_dir.path().join("test.db").to_string_lossy().into_owned();
+    (DatabaseConfig { url, ..Default::default() }, temp_dir)
+}
+
 /// Generate a random [`NoteDetailsCommitment`]
 pub fn random_note_details_commitment() -> NoteDetailsCommitment {
     let mut rng = rand::rng();

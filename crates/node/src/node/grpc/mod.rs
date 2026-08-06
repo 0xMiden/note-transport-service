@@ -347,15 +347,15 @@ mod tests {
     use miden_note_transport_proto::miden_note_transport::miden_note_transport_server::MidenNoteTransport;
 
     use super::*;
-    use crate::database::{Database, DatabaseConfig};
+    use crate::database::Database;
     use crate::metrics::Metrics;
+    use crate::test_utils::temp_database_config;
 
-    async fn test_server() -> GrpcServer {
+    async fn test_server() -> (GrpcServer, tempfile::TempDir) {
         let metrics = Metrics::default();
-        let db = Arc::new(
-            Database::connect(DatabaseConfig::default(), metrics.db.clone()).await.unwrap(),
-        );
-        GrpcServer::new(db, GrpcServerConfig::default(), metrics.grpc)
+        let (config, temp_dir) = temp_database_config();
+        let db = Arc::new(Database::connect(config, metrics.db.clone()).await.unwrap());
+        (GrpcServer::new(db, GrpcServerConfig::default(), metrics.grpc), temp_dir)
     }
 
     /// A client sending more tags than `MAX_TAGS_PER_FETCH_REQUEST` is rejected
@@ -364,7 +364,7 @@ mod tests {
     /// ceiling.
     #[tokio::test]
     async fn test_fetch_notes_rejects_too_many_tags() {
-        let server = test_server().await;
+        let (server, _temp_dir) = test_server().await;
 
         let tags = vec![0u32; MAX_TAGS_PER_FETCH_REQUEST + 1];
         let request = tonic::Request::new(FetchNotesRequest { tags, cursor: 0 });
@@ -384,7 +384,7 @@ mod tests {
     /// `BTreeSet` before issuing the query.)
     #[tokio::test]
     async fn test_fetch_notes_accepts_max_tags_at_limit() {
-        let server = test_server().await;
+        let (server, _temp_dir) = test_server().await;
 
         let tags = vec![0u32; MAX_TAGS_PER_FETCH_REQUEST];
         let request = tonic::Request::new(FetchNotesRequest { tags, cursor: 0 });

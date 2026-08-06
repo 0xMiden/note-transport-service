@@ -10,7 +10,7 @@ pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("src/database/sqlit
 
 #[instrument(level = "debug", skip_all, err)]
 pub fn apply_migrations(conn: &mut SqliteConnection) -> std::result::Result<(), DatabaseError> {
-    let migrations = conn.pending_migrations(MIGRATIONS).expect("In memory migrations never fail");
+    let migrations = conn.pending_migrations(MIGRATIONS).expect("embedded migrations are valid");
     tracing::info!("Applying {} migration(s)", migrations.len());
 
     if let Err(e) = conn.run_pending_migrations(MIGRATIONS) {

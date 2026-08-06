@@ -1,5 +1,5 @@
 use clap::Parser;
-use miden_note_transport_node::database::DatabaseConfig;
+use miden_note_transport_node::database::{DEFAULT_DATABASE_URL, DatabaseConfig};
 use miden_note_transport_node::logging::{TracingConfig, setup_tracing};
 use miden_note_transport_node::node::grpc::GrpcServerConfig;
 use miden_note_transport_node::{Node, NodeConfig, Result};
@@ -18,7 +18,7 @@ struct Args {
     port: u16,
 
     /// Database URL
-    #[arg(long, default_value = ":memory:")]
+    #[arg(long, default_value = DEFAULT_DATABASE_URL)]
     database_url: String,
 
     /// Retention period in days

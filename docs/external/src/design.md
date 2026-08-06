@@ -84,7 +84,7 @@ The current server implementation does not use the request cursor to initialize 
 
 ## Storage and retention
 
-The node uses SQLite and embedded migrations. File-backed databases use a larger connection pool. In-memory databases use a single connection because SQLite `:memory:` databases are isolated per connection.
+The node uses a file-backed SQLite database and embedded migrations.
 
 Notes older than the configured retention period are removed by a maintenance task.
 

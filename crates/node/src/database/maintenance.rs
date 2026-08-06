@@ -70,7 +70,7 @@ mod tests {
 
     use super::*;
     use crate::metrics::Metrics;
-    use crate::test_utils::test_note_header;
+    use crate::test_utils::{temp_database_config, test_note_header};
     use crate::types::StoredNote;
 
     fn note_at(age: Duration) -> StoredNote {
@@ -86,7 +86,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_cleanup_old_notes_no_retention() {
-        let config = DatabaseConfig { retention_days: 0, ..Default::default() };
+        let (mut config, _temp_dir) = temp_database_config();
+        config.retention_days = 0;
 
         let db = Arc::new(Database::connect(config.clone(), Metrics::default().db).await.unwrap());
         db.store_note(&note_at(Duration::from_secs(30))).await.unwrap();
@@ -102,7 +103,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_cleanup_old_notes_retention() {
-        let config = DatabaseConfig { retention_days: 7, ..Default::default() };
+        let (mut config, _temp_dir) = temp_database_config();
+        config.retention_days = 7;
 
         let db = Arc::new(Database::connect(config.clone(), Metrics::default().db).await.unwrap());
         db.store_note(&note_at(Duration::from_secs(30))).await.unwrap();
@@ -118,7 +120,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_cleanup_old_notes_mixed_ages() {
-        let config = DatabaseConfig { retention_days: 1, ..Default::default() };
+        let (mut config, _temp_dir) = temp_database_config();
+        config.retention_days = 1;
 
         let db = Arc::new(Database::connect(config.clone(), Metrics::default().db).await.unwrap());
         db.store_note(&note_at(Duration::from_secs(30))).await.unwrap();

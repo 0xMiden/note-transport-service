@@ -64,10 +64,13 @@ pub struct DatabaseConfig {
     pub retention_days: u32,
 }
 
+/// Default path of the SQLite database file.
+pub const DEFAULT_DATABASE_URL: &str = "mtln.db";
+
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            url: ":memory:".to_string(),
+            url: DEFAULT_DATABASE_URL.to_string(),
             retention_days: 30,
         }
     }
@@ -126,16 +129,51 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::metrics::Metrics;
-    use crate::test_utils::{TAG_LOCAL_ANY, test_note_header, test_note_header_with_tag};
+    use crate::test_utils::{
+        TAG_LOCAL_ANY,
+        temp_database_config,
+        test_note_header,
+        test_note_header_with_tag,
+    };
+
+    async fn test_database() -> (Database, TempDir) {
+        let (config, temp_dir) = temp_database_config();
+        let database = Database::connect(config, Metrics::default().db).await.unwrap();
+        (database, temp_dir)
+    }
+
+    #[test]
+    fn test_default_database_is_file_backed() {
+        assert_eq!(DatabaseConfig::default().url, DEFAULT_DATABASE_URL);
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_databases_are_rejected() {
+        for url in [":memory:", "file::memory:?cache=shared", "file:notes?mode=memory&cache=shared"]
+        {
+            let result = Database::connect(
+                DatabaseConfig {
+                    url: url.to_string(),
+                    ..Default::default()
+                },
+                Metrics::default().db,
+            )
+            .await;
+
+            assert!(
+                matches!(result, Err(DatabaseError::Configuration(message)) if message.contains("in-memory")),
+                "expected an in-memory database configuration error for {url}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_sqlite_database() {
-        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
-            .await
-            .unwrap();
+        let (db, _temp_dir) = test_database().await;
 
         let note = StoredNote {
             header: test_note_header(),
@@ -164,9 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seq_assigned_monotonically_in_insert_order() {
-        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
-            .await
-            .unwrap();
+        let (db, _temp_dir) = test_database().await;
 
         let first = StoredNote {
             header: test_note_header(),
@@ -207,14 +243,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_store_fetch_sees_all_rows() {
-        // Regression test for the `:memory:` pool-isolation bug: when the pool
-        // had max_size>1 and the URL was `:memory:`, writes and reads could
-        // land on different connections and each connection had its own
-        // isolated in-memory DB. Result: writes silently split across pool
-        // connections, fetches only saw a fraction of the actual data.
-        //
-        // With the pool clamped to size=1 for `:memory:`, all ops go to the
-        // same connection and see the same DB.
         use std::sync::Arc;
 
         use tokio::task::JoinSet;
@@ -222,14 +250,10 @@ mod tests {
         const TAG_A: u32 = 0x3d9c_0000;
         const TAG_B: u32 = 0x47ac_0000;
 
-        let db = Arc::new(
-            Database::connect(DatabaseConfig::default(), Metrics::default().db)
-                .await
-                .unwrap(),
-        );
+        let (db, _temp_dir) = test_database().await;
+        let db = Arc::new(db);
 
-        // Spawn many concurrent writers — more than the old max_size=16 — so
-        // that the bug would have fragmented writes across connections.
+        // Spawn more concurrent writers than the connection pool can service at once.
         let mut writers = JoinSet::new();
         for i in 0..40u32 {
             let db = db.clone();
@@ -262,9 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_notes_seq_cursor_filtering() {
-        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
-            .await
-            .unwrap();
+        let (db, _temp_dir) = test_database().await;
 
         let note = StoredNote {
             header: test_note_header(),
@@ -298,9 +320,7 @@ mod tests {
     /// distinct monotonic id and both are reachable.
     #[tokio::test]
     async fn test_seq_cursor_survives_identical_created_at() {
-        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
-            .await
-            .unwrap();
+        let (db, _temp_dir) = test_database().await;
 
         let t = Utc::now();
         let note1 = StoredNote {
@@ -357,9 +377,7 @@ mod tests {
         const TAG_A: u32 = 0x3d9c_0000;
         const TAG_B: u32 = 0x47ac_0000;
 
-        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
-            .await
-            .unwrap();
+        let (db, _temp_dir) = test_database().await;
 
         // Seed: one pre-existing tag A note.
         db.store_note(&StoredNote {
@@ -449,9 +467,7 @@ mod tests {
     /// Cursors above `LEGACY_CURSOR_THRESHOLD` are treated as 0.
     #[tokio::test]
     async fn test_fetch_notes_resets_legacy_cursor() {
-        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
-            .await
-            .unwrap();
+        let (db, _temp_dir) = test_database().await;
 
         let note = StoredNote {
             header: test_note_header(),
@@ -485,9 +501,7 @@ mod tests {
     async fn test_fetch_notes_paginates_at_batch_limit() {
         use crate::database::sqlite::FETCH_NOTES_BATCH_SIZE;
 
-        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
-            .await
-            .unwrap();
+        let (db, _temp_dir) = test_database().await;
 
         // Insert BATCH_SIZE + extra notes for the same tag.
         let extra: usize = 7;
@@ -538,9 +552,7 @@ mod tests {
     async fn test_block_context_round_trips_through_store_and_fetch() {
         use miden_note_transport_proto::miden_note_transport::TransportNote;
 
-        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
-            .await
-            .unwrap();
+        let (db, _temp_dir) = test_database().await;
 
         // Store a note with a typical after_block_num value.
         let note = StoredNote {
