@@ -52,12 +52,44 @@ impl Node {
     }
 
     /// Node running-task
-    pub async fn entrypoint(self) {
+    ///
+    /// Returns the error that brought the server down, so that the process can exit non-zero and
+    /// supervisors configured to restart on failure actually restart it.
+    pub async fn entrypoint(self) -> Result<()> {
         info!("Starting Miden Transport Node");
         tokio::spawn(self.maintenance.entrypoint());
 
-        if let Err(e) = self.grpc.serve().await {
-            error!("Server error: {e}");
-        }
+        self.grpc.serve().await.inspect_err(|e| error!("Server error: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
+
+    use super::*;
+
+    /// A fatal server error must reach the caller rather than being logged and swallowed,
+    /// otherwise the process exits 0 and `restart: on-failure` never fires.
+    #[tokio::test]
+    async fn entrypoint_returns_the_error_that_brought_the_server_down() {
+        // Hold the port so that the node's own bind is guaranteed to fail.
+        let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = occupied.local_addr().unwrap().port();
+
+        let config = NodeConfig {
+            grpc: GrpcServerConfig {
+                host: "127.0.0.1".into(),
+                port,
+                ..Default::default()
+            },
+            database: DatabaseConfig::default(),
+        };
+
+        let node = Node::init(config).await.unwrap();
+
+        let err = node.entrypoint().await.unwrap_err();
+
+        assert!(err.to_string().contains("Server error"), "unexpected error: {err}");
     }
 }
