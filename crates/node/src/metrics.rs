@@ -1,3 +1,5 @@
+use std::mem::ManuallyDrop;
+
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 
@@ -275,11 +277,19 @@ pub struct RequestTimer<'a> {
 
 impl RequestTimer<'_> {
     /// Finish the request and record the duration
-    pub fn finish(&self, status: &str) {
-        let duration = self.start.elapsed();
-        let duration_s = duration.as_secs_f64();
+    ///
+    /// Consumes the timer so that a request is recorded exactly once. A timer that is dropped
+    /// without reaching here is recorded by [`Drop`] instead, with `status = "error"`.
+    pub fn finish(self, status: &str) {
+        // Recording here and letting `Drop` run as well would enter every request twice.
+        let this = ManuallyDrop::new(self);
+        this.record(status);
+    }
 
-        // Record request duration
+    /// Record the elapsed duration against this timer's operation and the given status.
+    fn record(&self, status: &str) {
+        let duration_s = self.start.elapsed().as_secs_f64();
+
         self.histogram.record(
             duration_s,
             &[
@@ -291,7 +301,87 @@ impl RequestTimer<'_> {
 }
 
 impl Drop for RequestTimer<'_> {
+    /// A timer that goes out of scope without [`RequestTimer::finish`] means the handler returned
+    /// early, i.e. the request failed.
     fn drop(&mut self) {
-        self.finish("dropped");
+        self.record("error");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+
+    use super::*;
+
+    /// Collect the `status` attribute of every data point recorded against `metric_name`.
+    ///
+    /// Each entry is one data point, so repeated statuses mean repeated recordings.
+    fn recorded_statuses(exporter: &InMemoryMetricExporter, metric_name: &str) -> Vec<String> {
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+
+        let mut statuses = Vec::new();
+
+        for resource_metrics in exporter.get_finished_metrics().unwrap() {
+            for scope in resource_metrics.scope_metrics() {
+                for metric in scope.metrics().filter(|m| m.name() == metric_name) {
+                    let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data()
+                    else {
+                        panic!("{metric_name} is not an f64 histogram");
+                    };
+
+                    for point in histogram.data_points() {
+                        for attribute in point.attributes() {
+                            if attribute.key.as_str() == "status" {
+                                statuses.push(attribute.value.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        statuses.sort();
+        statuses
+    }
+
+    /// Drive `record_request` against a private meter and return what reached the exporter.
+    fn statuses_for(record_request: impl FnOnce(&MetricsGrpc)) -> Vec<String> {
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+
+        let metrics = MetricsGrpc::new(&provider.meter("test"));
+        record_request(&metrics);
+
+        provider.force_flush().unwrap();
+
+        recorded_statuses(&exporter, "grpc_send_note_duration")
+    }
+
+    /// A finished request must produce exactly one duration sample. Previously `finish` took
+    /// `&self` and `Drop` recorded unconditionally, so every success was counted twice — once as
+    /// `ok` and once as `dropped` — inflating sample counts and firing the only error signal on
+    /// the happy path.
+    #[test]
+    fn a_finished_request_is_recorded_once() {
+        let statuses = statuses_for(|metrics| {
+            metrics.grpc_send_note_request(64).finish("ok");
+        });
+
+        assert_eq!(statuses, ["ok"]);
+    }
+
+    /// A handler that returns early drops the timer without finishing it. That is a failed
+    /// request and must be recorded as such, exactly once.
+    #[test]
+    fn an_abandoned_request_is_recorded_once_as_an_error() {
+        let statuses = statuses_for(|metrics| {
+            let _timer = metrics.grpc_send_note_request(64);
+        });
+
+        assert_eq!(statuses, ["error"]);
     }
 }
