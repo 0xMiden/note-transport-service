@@ -93,7 +93,16 @@ pub fn setup_tracing(cfg: TracingConfig) -> Result<()> {
                 Ok(exporter) => {
                     Some(open_telemetry_layer(exporter, "miden-note-transport-node".to_string()))
                 },
-                Err(_) => None,
+                // The operator asked for export by configuring an endpoint, so silently running
+                // without traces would leave them staring at an empty dashboard.
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "OTLP endpoint is configured but the trace exporter could not be built; \
+                         continuing without trace export"
+                    );
+                    None
+                },
             }
         } else {
             None
