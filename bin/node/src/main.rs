@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use clap::Parser;
 use miden_note_transport_node::database::DatabaseConfig;
 use miden_note_transport_node::logging::{TracingConfig, setup_tracing};
@@ -36,6 +38,13 @@ struct Args {
     /// Connection timeout in seconds
     #[arg(long, default_value = "4")]
     request_timeout: usize,
+
+    /// Seconds to keep serving after reporting `NOT_SERVING` on shutdown
+    ///
+    /// Should cover at least one health-check interval of whatever load balancer fronts the
+    /// service, so it stops routing here before the node stops accepting. 0 drains immediately.
+    #[arg(long, default_value = "12")]
+    shutdown_grace_secs: u64,
 }
 
 #[tokio::main]
@@ -69,6 +78,7 @@ async fn main() -> Result<()> {
             max_note_size: args.max_note_size,
             max_connections: args.max_connections,
             request_timeout: args.request_timeout,
+            shutdown_grace: Duration::from_secs(args.shutdown_grace_secs),
         },
         database: DatabaseConfig {
             url: args.database_url,

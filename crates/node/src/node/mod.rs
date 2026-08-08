@@ -98,6 +98,8 @@ mod tests {
             grpc: GrpcServerConfig {
                 host: "127.0.0.1".into(),
                 port,
+                // Drain immediately; there is no load balancer to wait for.
+                shutdown_grace: std::time::Duration::ZERO,
                 ..Default::default()
             },
             database: DatabaseConfig::default(),

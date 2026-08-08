@@ -42,6 +42,18 @@ use crate::metrics::MetricsGrpc;
 /// being an attack surface.
 const MAX_TAGS_PER_FETCH_REQUEST: usize = 128;
 
+/// How often the readiness probe asks the database whether it can still serve queries.
+///
+/// The probe is one trivial statement on a pooled connection, so it is cheap enough to run often;
+/// 5s bounds how long a wedged database can keep being advertised as healthy to roughly one
+/// load-balancer health-check interval.
+const READINESS_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Default for [`GrpcServerConfig::shutdown_grace`].
+///
+/// Kubernetes' default readiness period is 10s, so one interval plus slack.
+const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(12);
+
 /// Miden Note Transport gRPC server
 pub struct GrpcServer {
     database: Arc<Database>,
@@ -63,6 +75,13 @@ pub struct GrpcServerConfig {
     pub max_connections: usize,
     /// Connection timeout in seconds
     pub request_timeout: usize,
+    /// How long to keep serving after reporting `NOT_SERVING`, before the drain begins
+    ///
+    /// Load balancers notice a status change on their own polling interval, not immediately.
+    /// Stopping the moment the status flips would black-hole whatever they route in between, so
+    /// this should cover at least one health-check interval of whatever fronts the service. Zero
+    /// drains immediately.
+    pub shutdown_grace: Duration,
 }
 
 /// Streaming task interface context
@@ -79,6 +98,7 @@ impl Default for GrpcServerConfig {
             max_note_size: 512_000,
             max_connections: 4096,
             request_timeout: 4,
+            shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
         }
     }
 }
@@ -108,6 +128,29 @@ impl GrpcServer {
         let (health_reporter, health_svc) = tonic_health::server::health_reporter();
         health_reporter.set_serving::<MidenNoteTransportServer<Self>>().await;
 
+        // Keep the reported status honest for as long as we serve. Reporting SERVING once at
+        // startup and never revisiting it means a wedged database, a full disk or an exhausted
+        // connection pool all leave the process advertising itself as healthy, and load balancers
+        // keep routing into it.
+        let readiness =
+            tokio::spawn(readiness_probe(self.database.clone(), health_reporter.clone()));
+
+        // Flip to NOT_SERVING before the drain starts, and hold for the grace period, so that
+        // load balancers have a chance to take this instance out of rotation before it stops
+        // accepting.
+        let grace = self.config.shutdown_grace;
+        let shutdown = async move {
+            shutdown.await;
+
+            health_reporter.set_not_serving::<MidenNoteTransportServer<Self>>().await;
+            tracing::info!(
+                grace_secs = grace.as_secs(),
+                "Health set to NOT_SERVING, holding before drain"
+            );
+
+            tokio::time::sleep(grace).await;
+        };
+
         let reflection_svc = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
             .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
@@ -135,9 +178,36 @@ impl GrpcServer {
             .await
             .map_err(|e| crate::Error::Internal(format!("Server error: {e}")))?;
 
+        readiness.abort();
         tracing::info!("gRPC server drained");
 
         Ok(())
+    }
+}
+
+/// Keep the gRPC health status in step with whether the database can actually serve queries.
+///
+/// Runs until aborted, so a database that recovers flips the service back to SERVING without a
+/// restart.
+async fn readiness_probe(database: Arc<Database>, reporter: tonic_health::server::HealthReporter) {
+    let mut serving = true;
+
+    loop {
+        tokio::time::sleep(READINESS_PROBE_INTERVAL).await;
+
+        match database.health_check().await {
+            Ok(()) if !serving => {
+                reporter.set_serving::<MidenNoteTransportServer<GrpcServer>>().await;
+                serving = true;
+                tracing::info!("Database reachable again, health set to SERVING");
+            },
+            Err(e) if serving => {
+                reporter.set_not_serving::<MidenNoteTransportServer<GrpcServer>>().await;
+                serving = false;
+                tracing::error!(error = %e, "Database health check failed, health set to NOT_SERVING");
+            },
+            _ => {},
+        }
     }
 }
 
