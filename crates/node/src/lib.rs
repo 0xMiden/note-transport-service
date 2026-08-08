@@ -37,6 +37,8 @@ pub mod logging;
 pub mod metrics;
 /// Main node implementation
 pub mod node;
+/// Process shutdown signalling
+pub mod shutdown;
 /// Testing functions
 ///
 /// Available during tests or when the `testing` feature is enabled.

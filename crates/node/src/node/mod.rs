@@ -53,13 +53,32 @@ impl Node {
 
     /// Node running-task
     ///
+    /// Serves until `shutdown` resolves, then drains in-flight requests, stops the note streamer
+    /// and the maintenance loop, and returns.
+    ///
     /// Returns the error that brought the server down, so that the process can exit non-zero and
     /// supervisors configured to restart on failure actually restart it.
-    pub async fn entrypoint(self) -> Result<()> {
+    pub async fn entrypoint(
+        self,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<()> {
         info!("Starting Miden Transport Node");
-        tokio::spawn(self.maintenance.entrypoint());
+        let maintenance = tokio::spawn(self.maintenance.entrypoint());
 
-        self.grpc.serve().await.inspect_err(|e| error!("Server error: {e}"))
+        let result = self
+            .grpc
+            .serve_with_shutdown(shutdown)
+            .await
+            .inspect_err(|e| error!("Server error: {e}"));
+
+        // The maintenance loop spends almost all of its time sleeping between cleanup passes and
+        // holds no client-visible state, so there is nothing to drain — aborting it mid-sleep is
+        // the intended stop. A cleanup pass interrupted mid-transaction rolls back, and the next
+        // start picks the same expired rows up again.
+        maintenance.abort();
+        info!("Maintenance loop stopped");
+
+        result
     }
 }
 
@@ -69,6 +88,45 @@ mod tests {
 
     use super::*;
 
+    /// Bind to port 0 to reserve a free port, then release it for the node to claim.
+    fn free_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    fn test_config(port: u16) -> NodeConfig {
+        NodeConfig {
+            grpc: GrpcServerConfig {
+                host: "127.0.0.1".into(),
+                port,
+                ..Default::default()
+            },
+            database: DatabaseConfig::default(),
+        }
+    }
+
+    /// The node must come back on its own once the shutdown signal fires. Before this, `serve`
+    /// ran until the process was killed, so SIGTERM cut in-flight work instead of draining it.
+    #[tokio::test]
+    async fn entrypoint_returns_once_the_shutdown_signal_fires() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let node = Node::init(test_config(free_port())).await.unwrap();
+
+        let running = tokio::spawn(node.entrypoint(async {
+            let _ = rx.await;
+        }));
+
+        // Let the server reach its accept loop before asking it to stop.
+        tokio::task::yield_now().await;
+        tx.send(()).unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), running)
+            .await
+            .expect("entrypoint must return after the shutdown signal")
+            .unwrap();
+
+        assert!(result.is_ok(), "a signalled shutdown is not a failure: {result:?}");
+    }
+
     /// A fatal server error must reach the caller rather than being logged and swallowed,
     /// otherwise the process exits 0 and `restart: on-failure` never fires.
     #[tokio::test]
@@ -77,18 +135,9 @@ mod tests {
         let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = occupied.local_addr().unwrap().port();
 
-        let config = NodeConfig {
-            grpc: GrpcServerConfig {
-                host: "127.0.0.1".into(),
-                port,
-                ..Default::default()
-            },
-            database: DatabaseConfig::default(),
-        };
+        let node = Node::init(test_config(port)).await.unwrap();
 
-        let node = Node::init(config).await.unwrap();
-
-        let err = node.entrypoint().await.unwrap_err();
+        let err = node.entrypoint(std::future::pending()).await.unwrap_err();
 
         assert!(err.to_string().contains("Server error"), "unexpected error: {err}");
     }

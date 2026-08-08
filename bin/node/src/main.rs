@@ -2,7 +2,7 @@ use clap::Parser;
 use miden_note_transport_node::database::DatabaseConfig;
 use miden_note_transport_node::logging::{TracingConfig, setup_tracing};
 use miden_note_transport_node::node::grpc::GrpcServerConfig;
-use miden_note_transport_node::{Node, NodeConfig, Result};
+use miden_note_transport_node::{Node, NodeConfig, Result, shutdown};
 use tracing::info;
 
 #[derive(Parser)]
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
     // endpoint env var is set (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or
     // OTEL_EXPORTER_OTLP_ENDPOINT).
     let tracing_cfg = TracingConfig::from_otel_env();
-    setup_tracing(tracing_cfg.clone())?;
+    let telemetry = setup_tracing(tracing_cfg.clone())?;
 
     info!("Starting Miden Transport Node...");
     info!("Host: {}", args.host);
@@ -76,7 +76,14 @@ async fn main() -> Result<()> {
         },
     };
 
-    // Run Node
+    // Run Node until a shutdown signal arrives
     let node = Node::init(config).await?;
-    node.entrypoint().await
+    let result = node.entrypoint(shutdown::signal()).await;
+
+    // Flush buffered spans and metrics last, so everything the shutdown itself emitted is
+    // exported rather than dying with the process.
+    telemetry.shutdown();
+    info!("Shutdown complete");
+
+    result
 }
