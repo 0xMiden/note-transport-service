@@ -5,6 +5,7 @@ mod sqlite;
 pub use self::error::DatabaseError;
 pub use self::maintenance::DatabaseMaintenance;
 use self::sqlite::SqliteDatabase;
+pub(crate) use self::sqlite::{LEGACY_CURSOR_THRESHOLD, effective_fetch_cursor};
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteId, NoteTag, StoredNote};
 
