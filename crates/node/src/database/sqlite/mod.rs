@@ -29,7 +29,18 @@ pub(crate) const FETCH_NOTES_BATCH_SIZE: i64 = 500;
 /// which at realistic insert rates is decades). 10^12 is two orders of magnitude
 /// above any plausible `seq` value we'd reach in the lifetime of this deployment,
 /// and two orders of magnitude below any microsecond timestamp this decade.
-const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
+pub(crate) const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
+
+/// Map a client cursor to the effective pagination cursor used for filtering
+/// and response advancement.
+///
+/// Legacy microsecond-timestamp cursors (above [`LEGACY_CURSOR_THRESHOLD`]) are
+/// treated as `0`. Callers that compute a response/`rcursor` must start from
+/// this value — not the raw request cursor — otherwise a legacy client loops
+/// on the same first batch forever (`max(1.7e15, seq) == 1.7e15`).
+pub(crate) fn effective_fetch_cursor(cursor: u64) -> u64 {
+    if cursor > LEGACY_CURSOR_THRESHOLD { 0 } else { cursor }
+}
 
 /// `SQLite` implementation of the database backend
 pub struct SqliteDatabase {
@@ -157,13 +168,13 @@ impl DatabaseBackend for SqliteDatabase {
         // carry microsecond-timestamp cursors; interpret those as 0 so they
         // don't stall forever waiting for `seq` to catch up. Record a metric
         // so operators can see when pre-migration clients are being reset.
-        let effective_cursor = if cursor > LEGACY_CURSOR_THRESHOLD {
+        // Response cursors must also start from this effective value (see
+        // gRPC `fetch_notes` / streamer) or pagination never converges.
+        let effective_cursor = effective_fetch_cursor(cursor);
+        if effective_cursor != cursor {
             self.metrics.db_fetch_notes_legacy_cursor_reset();
             tracing::info!(original_cursor = cursor, "Legacy cursor reset to 0");
-            0
-        } else {
-            cursor
-        };
+        }
 
         let cursor_i64: i64 = effective_cursor.try_into().map_err(|_| {
             DatabaseError::QueryExecution("Cursor too large for SQLite".to_string())
