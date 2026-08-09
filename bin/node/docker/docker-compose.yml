@@ -7,10 +7,10 @@ services:
     ports:
       - "57292:57292"  # gRPC
     command: ["miden-note-transport-node", "--host", "0.0.0.0", "--database-url", "/app/data/node.db"]
+    restart: unless-stopped
     environment:
       - JSON_LOGGING=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       - OTEL_SERVICE_NAME=miden-note-transport-node
       - RUST_LOG=INFO
       - DOCKER_ENV=true
@@ -23,7 +23,8 @@ services:
 
   # OpenTelemetry Collector
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
+    image: otel/opentelemetry-collector-contrib:0.158.0
+    restart: unless-stopped
     volumes:
       - ./bin/node/docker/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
     ports:
@@ -39,7 +40,8 @@ services:
 
   # Traces
   tempo:
-    image: grafana/tempo:latest
+    image: grafana/tempo:2.10.4
+    restart: unless-stopped
     command: [ "-config.file=/etc/tempo.yaml" ]
     volumes:
       - ./bin/node/docker/tempo.yaml:/etc/tempo.yaml:ro
@@ -50,7 +52,8 @@ services:
 
   # Metrics
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.13.2
+    restart: unless-stopped
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
     volumes:
@@ -65,11 +68,12 @@ services:
 
   # Visualization
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:12.4.8
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana_data:/var/lib/grafana

@@ -124,4 +124,5 @@ docker-run-node: ## Runs the node as a Docker container
 	docker run --name miden-note-transport-node \
 			   -p 57292:57292 \
                -v node-db:/db \
-               -d miden-note-transport-node
+               -d miden-note-transport-node \
+               miden-note-transport-node --host 0.0.0.0 --database-url /db/node.db
