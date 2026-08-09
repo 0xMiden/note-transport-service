@@ -21,6 +21,13 @@ struct Args {
     #[arg(long, default_value = ":memory:")]
     database_url: String,
 
+    /// Create the database file if it does not exist (file-backed URLs only).
+    ///
+    /// Without this flag, a missing path fails startup instead of silently
+    /// creating an empty database (which would reset the note sequence space).
+    #[arg(long, default_value_t = false)]
+    create_database: bool,
+
     /// Retention period in days
     #[arg(long, default_value = "30")]
     retention_days: u32,
@@ -73,6 +80,7 @@ async fn main() -> Result<()> {
         database: DatabaseConfig {
             url: args.database_url,
             retention_days: args.retention_days,
+            create_database: args.create_database,
         },
     };
 

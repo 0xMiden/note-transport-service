@@ -83,12 +83,6 @@ impl DatabaseBackend for SqliteDatabase {
         config: DatabaseConfig,
         metrics: MetricsDatabase,
     ) -> Result<Self, DatabaseError> {
-        if !std::path::Path::new(&config.url).exists() && !config.url.contains(":memory:") {
-            std::fs::File::create(&config.url).map_err(|e| {
-                DatabaseError::Configuration(format!("Failed to create database file: {e}"))
-            })?;
-        }
-
         // SQLite `:memory:` DBs are per-connection-isolated — two connections
         // pointing at `:memory:` see two different databases. With a pool of N
         // connections, writes splinter across N isolated DBs and most reads
@@ -104,6 +98,19 @@ impl DatabaseBackend for SqliteDatabase {
         // driver default). For file-backed URLs, a large pool is appropriate
         // since all connections open the same file.
         let is_in_memory = config.url == ":memory:" || config.url.starts_with("file::memory:");
+
+        if !is_in_memory && !std::path::Path::new(&config.url).exists() {
+            if !config.create_database {
+                return Err(DatabaseError::Configuration(format!(
+                    "Database file does not exist: {}. Pass --create-database to create it on first run.",
+                    config.url
+                )));
+            }
+            std::fs::File::create(&config.url).map_err(|e| {
+                DatabaseError::Configuration(format!("Failed to create database file: {e}"))
+            })?;
+        }
+
         let max_size = if is_in_memory { 1 } else { 16 };
 
         let manager = ConnectionManager::new(&config.url);
@@ -258,5 +265,103 @@ impl DatabaseBackend for SqliteDatabase {
             .await?;
 
         Ok(count > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::Metrics;
+
+    fn unique_db_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "miden-nts-{}-{}-{}.db",
+            label,
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ))
+    }
+
+    #[tokio::test]
+    async fn refuse_missing_database_file_without_create_flag() {
+        let path = unique_db_path("missing-refuse");
+        let _ = std::fs::remove_file(&path);
+        assert!(!path.exists());
+
+        let result = SqliteDatabase::connect(
+            DatabaseConfig {
+                url: path.to_string_lossy().into_owned(),
+                retention_days: 30,
+                create_database: false,
+            },
+            Metrics::default().db,
+        )
+        .await;
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("missing file must fail without --create-database"),
+        };
+
+        assert!(
+            matches!(err, DatabaseError::Configuration(_)),
+            "expected Configuration error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("does not exist"),
+            "error should mention missing file: {err}"
+        );
+        assert!(!path.exists(), "must not create the file on refuse");
+    }
+
+    #[tokio::test]
+    async fn create_missing_database_file_with_create_flag() {
+        let path = unique_db_path("missing-create");
+        let _ = std::fs::remove_file(&path);
+        assert!(!path.exists());
+
+        let db = SqliteDatabase::connect(
+            DatabaseConfig {
+                url: path.to_string_lossy().into_owned(),
+                retention_days: 30,
+                create_database: true,
+            },
+            Metrics::default().db,
+        )
+        .await
+        .expect("create_database should allow first-run file creation");
+
+        assert!(path.exists(), "database file should have been created");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn connect_existing_database_file_without_create_flag() {
+        let path = unique_db_path("existing");
+        std::fs::File::create(&path).expect("pre-create empty file");
+
+        let db = SqliteDatabase::connect(
+            DatabaseConfig {
+                url: path.to_string_lossy().into_owned(),
+                retention_days: 30,
+                create_database: false,
+            },
+            Metrics::default().db,
+        )
+        .await
+        .expect("existing file must connect without create_database");
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn memory_url_ignores_create_database_flag() {
+        // Regression: `:memory:` must keep working with create_database=false
+        // (the default). The missing-file guard must not apply to in-memory URLs.
+        let db = SqliteDatabase::connect(DatabaseConfig::default(), Metrics::default().db)
+            .await
+            .expect(":memory: connect must succeed without create_database");
+        drop(db);
     }
 }

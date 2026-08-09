@@ -32,8 +32,11 @@ miden-note-transport-node \
   --host 0.0.0.0 \
   --port 57292 \
   --database-url /var/lib/miden-note-transport/node.db \
+  --create-database \
   --retention-days 30
 ```
+
+On first run with a file-backed `--database-url`, pass `--create-database`. Without it, a missing path fails startup instead of silently creating an empty database (which would reset the note sequence space). After the file exists, omit the flag so a wrong path or deleted volume cannot recreate an empty DB unnoticed.
 
 ## CLI flags
 
@@ -42,6 +45,7 @@ miden-note-transport-node \
 | `--host` | `127.0.0.1` | Address to bind to. |
 | `--port` | `57292` | gRPC port. |
 | `--database-url` | `:memory:` | SQLite database URL or file path. Use a file path for persistence. |
+| `--create-database` | off | Create the SQLite file if missing (file-backed URLs only). Required for first run. |
 | `--retention-days` | `30` | How long to retain notes before cleanup. |
 | `--max-note-size` | `512000` | Maximum note details size in bytes. |
 | `--max-connections` | `4096` | Maximum concurrent gRPC connections. |
@@ -94,7 +98,7 @@ make docker-node-down
 
 to stop the stack.
 
-The Compose node service passes `--database-url /app/data/node.db` and mounts `/app/data` on the `node_data` volume, so note storage survives container restarts.
+The Compose node service passes `--database-url /app/data/node.db --create-database` and mounts `/app/data` on the `node_data` volume, so note storage survives container restarts and a fresh volume can initialize the file on first start.
 
 ## Ports
 
