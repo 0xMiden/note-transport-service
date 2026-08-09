@@ -62,6 +62,13 @@ pub struct DatabaseConfig {
     pub url: String,
     /// Retention period in days
     pub retention_days: u32,
+    /// When `true`, create the SQLite file if it does not exist.
+    ///
+    /// File-backed URLs refuse to start when the path is missing unless this
+    /// flag is set. Prevents a wrong `--database-url` (or an unmounted volume)
+    /// from silently creating an empty DB and resetting the `seq` space.
+    /// Ignored for `:memory:` / `file::memory:` URLs.
+    pub create_database: bool,
 }
 
 impl Default for DatabaseConfig {
@@ -69,6 +76,7 @@ impl Default for DatabaseConfig {
         Self {
             url: ":memory:".to_string(),
             retention_days: 30,
+            create_database: false,
         }
     }
 }
