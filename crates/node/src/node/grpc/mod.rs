@@ -27,7 +27,7 @@ use tower::timeout::TimeoutLayer;
 use tower_http::cors::{Any, CorsLayer};
 
 use self::streaming::{NoteStreamer, StreamerMessage, Sub, Subface};
-use crate::database::Database;
+use crate::database::{Database, normalize_legacy_cursor};
 use crate::metrics::MetricsGrpc;
 
 /// Upper bound on the number of tags a client may include in a single
@@ -258,7 +258,7 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             .await
             .map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
 
-        let mut rcursor = cursor;
+        let mut rcursor = normalize_legacy_cursor(cursor);
         for stored_note in &stored_notes {
             let seq_cursor: u64 = stored_note
                 .seq
@@ -349,6 +349,8 @@ mod tests {
     use super::*;
     use crate::database::{Database, DatabaseConfig};
     use crate::metrics::Metrics;
+    use crate::test_utils::{TAG_LOCAL_ANY, test_note_header};
+    use crate::types::StoredNote;
 
     async fn test_server() -> GrpcServer {
         let metrics = Metrics::default();
@@ -393,5 +395,49 @@ mod tests {
         let response = result.expect("request at the cap must succeed").into_inner();
         assert_eq!(response.notes.len(), 0, "DB is empty, no notes returned");
         assert_eq!(response.cursor, 0);
+    }
+
+    /// A pre-`seq` timestamp cursor must converge into the current cursor
+    /// space in the response as well as in the database query.
+    ///
+    /// Regression test for #130: the database already treated a legacy cursor
+    /// as 0, but the gRPC handler initialized the response cursor from the
+    /// original timestamp. That caused clients to request the same first page
+    /// forever.
+    #[tokio::test]
+    async fn test_fetch_notes_legacy_cursor_converges() {
+        let server = test_server().await;
+
+        server
+            .database
+            .store_note(&StoredNote {
+                header: test_note_header(),
+                details: vec![1, 2, 3, 4],
+                created_at: chrono::Utc::now(),
+                seq: 0,
+                after_block_num: None,
+            })
+            .await
+            .unwrap();
+
+        let legacy_cursor = 1_760_000_000_000_000;
+        let request = tonic::Request::new(FetchNotesRequest {
+            tags: vec![TAG_LOCAL_ANY],
+            cursor: legacy_cursor,
+        });
+        let response = server.fetch_notes(request).await.unwrap().into_inner();
+
+        assert_eq!(response.notes.len(), 1);
+        assert!(response.cursor > 0);
+        assert!(response.cursor < legacy_cursor);
+
+        let retry = tonic::Request::new(FetchNotesRequest {
+            tags: vec![TAG_LOCAL_ANY],
+            cursor: response.cursor,
+        });
+        let retry_response = server.fetch_notes(retry).await.unwrap().into_inner();
+
+        assert!(retry_response.notes.is_empty());
+        assert_eq!(retry_response.cursor, response.cursor);
     }
 }
