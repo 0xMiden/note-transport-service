@@ -31,6 +31,28 @@ Skip the changelog only when the PR contains no runtime-affecting changes
 (docs, CI, tooling, tests). In that case the hook will tell you to apply the
 `no changelog` label instead.
 
+## v0.5.0-rc.1 (2026-08-18)
+
+### Features
+
+- Added gRPC server reflection support to the node ([#110](https://github.com/0xMiden/note-transport-service/pull/110)).
+
+### Changes
+
+- [BREAKING] Changed the node binary name from `miden-note-transport-node-bin` to `miden-note-transport-node`; deployment scripts referencing the old name must be updated ([#104](https://github.com/0xMiden/note-transport-service/pull/104)).
+- Changed `miden-protocol` to `0.16.0-rc.5`, aligning with the `miden-node` and `miden-client` `0.16.0-rc.1` releases; the stored-note wire format and `NoteId` derivation are unchanged ([#150](https://github.com/0xMiden/note-transport-service/pull/150)).
+- Changed transitive dependencies to their latest compatible versions via `cargo update` ([#108](https://github.com/0xMiden/note-transport-service/pull/108)).
+
+### Fixes
+
+- Fixed the `Dockerfile` to build with Rust 1.96 and pruned unnecessary build dependencies ([#104](https://github.com/0xMiden/note-transport-service/pull/104)).
+
+## v0.5.0-alpha.1 (2026-07-16)
+
+### Changes
+
+- Changed `miden-protocol` to `0.16.0-alpha.2` and raised the MSRV to Rust 1.96.1; `NoteHeader` serialization stays compatible with 0.15-produced bytes ([#99](https://github.com/0xMiden/note-transport-service/pull/99)).
+
 ## v0.4.1 (2026-06-17)
 
 ### Features
