@@ -5,6 +5,8 @@ on:
     branches: [main, next]
   pull_request:
     types: [opened, reopened, synchronize]
+  merge_group:
+    types: [checks_requested]
 
 
 # Limits workflow concurrency to only the latest commit in the PR.
