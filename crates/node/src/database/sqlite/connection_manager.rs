@@ -93,7 +93,30 @@ pub fn configure_connection_on_creation(
         .map_err(ConnectionManagerError::ConnectionParamSetup)?;
 
     // Set busy timeout to handle concurrent access (30 seconds)
+    //
+    // NOTE: this is longer than the gRPC request timeout, so a request that has already timed out
+    // can still occupy a blocking thread and a pool connection while it waits here. Aligning the
+    // two means threading the server config down to the pool; tracked in #132.
     diesel::sql_query("PRAGMA busy_timeout=30000")
+        .execute(conn)
+        .map_err(ConnectionManagerError::ConnectionParamSetup)?;
+
+    // Fsync the WAL on every commit.
+    //
+    // Between `send_note` and the recipient consuming it, this database is the only copy of a
+    // note in existence — there is no sender-side queue to replay from and no peer to re-fetch
+    // from. `NORMAL` would leave the last commits before a power loss or OS crash on the floor,
+    // which for this service means notes that were acknowledged and then silently lost. The
+    // per-commit fsync is the price of being the sole holder of the payload.
+    diesel::sql_query("PRAGMA synchronous=FULL")
+        .execute(conn)
+        .map_err(ConnectionManagerError::ConnectionParamSetup)?;
+
+    // Checkpoint the WAL every 1000 pages (~4 MB at the default page size).
+    //
+    // This is SQLite's own default, set explicitly so that the WAL growth characteristics are
+    // part of this configuration rather than whatever the linked libsqlite3 was built with.
+    diesel::sql_query("PRAGMA wal_autocheckpoint=1000")
         .execute(conn)
         .map_err(ConnectionManagerError::ConnectionParamSetup)?;
 
