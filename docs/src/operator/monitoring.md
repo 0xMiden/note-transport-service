@@ -2,9 +2,10 @@
 
 We provide logging to `stdout` and an optional [OpenTelemetry](https://opentelemetry.io/) exporter for our metrics and traces.
 
-OpenTelemetry exporting can be enabled by setting the `OTEL_ENABLED=true` environment variable when operating
-the node. The OTLP endpoint (default `http://localhost:4317`) can be overridden with `OTEL_TRACES_ENDPOINT`, and
-structured JSON logging to `stdout` can be enabled with `JSON_LOGGING=true`.
+OpenTelemetry exporting is enabled by pointing the node at an OTLP endpoint with the standard
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable; the former takes
+precedence. There is no separate on/off switch — export is on when an endpoint is set and off when neither
+variable is set or both are empty. Structured JSON logging to `stdout` can be enabled with `JSON_LOGGING=true`.
 
 ## Metrics
 
@@ -75,13 +76,15 @@ export RUST_LOG=debug
 
 ## Configuration
 
-The OpenTelemetry trace and metrics exporters are enabled by setting `OTEL_ENABLED=true` when starting the node:
+The OpenTelemetry trace and metrics exporters are enabled by setting an OTLP endpoint when starting the node:
 
 ```sh
-OTEL_ENABLED=true \
-OTEL_TRACES_ENDPOINT=http://localhost:4317 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
 miden-note-transport-node
 ```
+
+To point traces somewhere other than the general endpoint, set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, which
+takes precedence over `OTEL_EXPORTER_OTLP_ENDPOINT`.
 
 Further exporter behaviour can be configured using the standard OpenTelemetry environment variables as specified in the
 official [documents](https://opentelemetry.io/docs/specs/otel/protocol/exporter/).
