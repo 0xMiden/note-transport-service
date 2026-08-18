@@ -27,7 +27,7 @@ use tower::timeout::TimeoutLayer;
 use tower_http::cors::{Any, CorsLayer};
 
 use self::streaming::{NoteStreamer, StreamerMessage, Sub, Subface};
-use crate::database::Database;
+use crate::database::{Database, DatabaseError};
 use crate::metrics::MetricsGrpc;
 
 /// Upper bound on the number of tags a client may include in a single
@@ -177,8 +177,10 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
                 Status::invalid_argument(format!("Invalid header: {e:?}"))
             })?;
 
+        let note_id = header.id();
+
         tracing::debug!(
-            note_id = %header.id(),
+            note_id = %note_id,
             tag = header.metadata().tag().as_u32(),
             has_after_block_num = pnote.after_block_num.is_some(),
             "send_note accepted"
@@ -194,9 +196,18 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             after_block_num: pnote.after_block_num,
         };
 
-        self.database
-            .store_note(&note_for_db)
-            .await.map_err(|e| tonic::Status::internal(format!("Failed to store note: {e:?}")))?;
+        // `notes.id` is UNIQUE, so re-sending a note that is already stored trips the constraint.
+        // That is the ack-lost retry path, not a failure: the note is on the server either way, so
+        // report success and let the client stop retrying.
+        match self.database.store_note(&note_for_db).await {
+            Ok(()) => {},
+            Err(DatabaseError::UniqueViolation(_)) => {
+                tracing::debug!(note_id = %note_id, "send_note is a duplicate of a stored note");
+            },
+            Err(e) => {
+                return Err(tonic::Status::internal(format!("Failed to store note: {e:?}")));
+            },
+        }
 
         timer.finish("ok");
 
@@ -343,12 +354,18 @@ impl Drop for StreamerCtx {
 mod tests {
     use std::sync::Arc;
 
-    use miden_note_transport_proto::miden_note_transport::FetchNotesRequest;
     use miden_note_transport_proto::miden_note_transport::miden_note_transport_server::MidenNoteTransport;
+    use miden_note_transport_proto::miden_note_transport::{
+        FetchNotesRequest,
+        SendNoteRequest,
+        TransportNote,
+    };
+    use miden_protocol::utils::serde::Serializable;
 
     use super::*;
     use crate::database::{Database, DatabaseConfig};
     use crate::metrics::Metrics;
+    use crate::test_utils::test_note_header;
 
     async fn test_server() -> GrpcServer {
         let metrics = Metrics::default();
@@ -356,6 +373,17 @@ mod tests {
             Database::connect(DatabaseConfig::default(), metrics.db.clone()).await.unwrap(),
         );
         GrpcServer::new(db, GrpcServerConfig::default(), metrics.grpc)
+    }
+
+    /// Build a `SendNoteRequest` carrying a fresh random note.
+    fn test_send_request() -> SendNoteRequest {
+        SendNoteRequest {
+            note: Some(TransportNote {
+                header: test_note_header().to_bytes(),
+                details: b"details".to_vec(),
+                after_block_num: None,
+            }),
+        }
     }
 
     /// A client sending more tags than `MAX_TAGS_PER_FETCH_REQUEST` is rejected
@@ -393,5 +421,37 @@ mod tests {
         let response = result.expect("request at the cap must succeed").into_inner();
         assert_eq!(response.notes.len(), 0, "DB is empty, no notes returned");
         assert_eq!(response.cursor, 0);
+    }
+
+    /// Re-sending a note the server already holds is the ack-lost retry path. It must succeed
+    /// rather than surfacing the `notes.id` UNIQUE violation as `INTERNAL`.
+    #[tokio::test]
+    async fn test_send_note_is_idempotent_on_a_duplicate() {
+        let server = test_server().await;
+        let request = test_send_request();
+
+        server
+            .send_note(tonic::Request::new(request.clone()))
+            .await
+            .expect("first send must succeed");
+        server
+            .send_note(tonic::Request::new(request))
+            .await
+            .expect("re-sending the same note must succeed");
+
+        let (note_count, _) = server.database.get_stats().await.unwrap();
+        assert_eq!(note_count, 1, "the duplicate must not be stored a second time");
+    }
+
+    /// Two genuinely different notes are both stored.
+    #[tokio::test]
+    async fn test_send_note_stores_distinct_notes() {
+        let server = test_server().await;
+
+        server.send_note(tonic::Request::new(test_send_request())).await.unwrap();
+        server.send_note(tonic::Request::new(test_send_request())).await.unwrap();
+
+        let (note_count, _) = server.database.get_stats().await.unwrap();
+        assert_eq!(note_count, 2);
     }
 }

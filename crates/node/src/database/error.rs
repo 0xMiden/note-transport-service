@@ -27,6 +27,13 @@ pub enum DatabaseError {
     #[error("Deserialization error: {0}")]
     Deserialization(String),
 
+    /// Unique constraint violation
+    ///
+    /// Kept separate from [`DatabaseError::ConstraintViolation`] so that callers can tell "this
+    /// row already exists" apart from a genuine integrity failure.
+    #[error("Unique constraint violation: {0}")]
+    UniqueViolation(String),
+
     /// Constraint violation error
     #[error("Constraint violation: {0}")]
     ConstraintViolation(String),
@@ -48,9 +55,9 @@ impl From<diesel::result::Error> for DatabaseError {
     fn from(err: diesel::result::Error) -> Self {
         match err {
             diesel::result::Error::DatabaseError(kind, info) => match kind {
-                diesel::result::DatabaseErrorKind::UniqueViolation => Self::ConstraintViolation(
-                    format!("Unique constraint violation: {}", info.message()),
-                ),
+                diesel::result::DatabaseErrorKind::UniqueViolation => {
+                    Self::UniqueViolation(info.message().to_string())
+                },
                 diesel::result::DatabaseErrorKind::ForeignKeyViolation => {
                     Self::ConstraintViolation(format!(
                         "Foreign key constraint violation: {}",

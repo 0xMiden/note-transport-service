@@ -79,6 +79,10 @@ message TagStats {
 // gRPC service definition
 service MidenNoteTransport {
     // Send a note to the server
+    //
+    // Idempotent on the note ID: re-sending a note the server already holds
+    // succeeds without storing a second copy. Clients that lose the ack can
+    // therefore retry safely.
     rpc SendNote(SendNoteRequest) returns (SendNoteResponse);
     
     // Fetch notes for a specific tag
