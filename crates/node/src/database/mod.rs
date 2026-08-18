@@ -48,6 +48,12 @@ pub trait DatabaseBackend: Send + Sync {
 
     /// Check if a note exists
     async fn note_exists(&self, note_id: NoteId) -> Result<bool, DatabaseError>;
+
+    /// Check that the database is reachable and can serve queries
+    ///
+    /// Takes a pool connection and runs a trivial statement, so it fails when the pool is
+    /// exhausted, the file has gone away, or the database is otherwise wedged.
+    async fn health_check(&self) -> Result<(), DatabaseError>;
 }
 
 /// Database manager for the transport layer
@@ -120,6 +126,11 @@ impl Database {
     /// Check if a note exists
     pub async fn note_exists(&self, note_id: NoteId) -> Result<bool, DatabaseError> {
         self.backend.note_exists(note_id).await
+    }
+
+    /// Check that the database is reachable and can serve queries
+    pub async fn health_check(&self) -> Result<(), DatabaseError> {
+        self.backend.health_check().await
     }
 }
 
