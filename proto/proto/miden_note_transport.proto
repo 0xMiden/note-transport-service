@@ -67,6 +67,8 @@ message StatsResponse {
     uint64 total_notes = 1;
     uint64 total_tags = 2;
     repeated TagStats notes_per_tag = 3;
+    // Version of the node serving this response.
+    string version = 4;
 }
 
 // Statistics for a specific tag

@@ -324,6 +324,7 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             total_notes,
             total_tags,
             notes_per_tag: Vec::new(), // TODO: Implement notes_per_tag
+            version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
         Ok(tonic::Response::new(response))

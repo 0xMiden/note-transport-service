@@ -77,6 +77,9 @@ pub struct StatsResponse {
     pub total_tags: u64,
     #[prost(message, repeated, tag = "3")]
     pub notes_per_tag: ::prost::alloc::vec::Vec<TagStats>,
+    /// Version of the node serving this response.
+    #[prost(string, tag = "4")]
+    pub version: ::prost::alloc::string::String,
 }
 /// Statistics for a specific tag
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
