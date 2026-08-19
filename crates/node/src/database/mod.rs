@@ -34,11 +34,21 @@ pub trait DatabaseBackend: Send + Sync {
     /// This is the preferred multi-tag query — running per-tag queries back
     /// to back reopens a race where a concurrent INSERT can land between two
     /// per-tag queries and get leapfrogged by the cursor advance.
+    ///
+    /// Returns the matching notes and the *effective* cursor used for the
+    /// `seq > ?` filter — 0 if the requested cursor was reset (legacy µs cursor,
+    /// or stranded above the seq high-water), otherwise the requested cursor.
+    /// Callers should base their response cursor on this effective value so a
+    /// reset heals the client rather than re-triggering every poll.
+    ///
+    /// An empty tag set short-circuits before the stranded-cursor check and
+    /// returns the post-legacy cursor unchanged (there are no notes to deliver,
+    /// so there is nothing to heal).
     async fn fetch_notes_by_tags(
         &self,
         tags: &[NoteTag],
         cursor: u64,
-    ) -> Result<Vec<StoredNote>, DatabaseError>;
+    ) -> Result<(Vec<StoredNote>, u64), DatabaseError>;
 
     /// Get statistics about the database
     async fn get_stats(&self) -> Result<(u64, u64), DatabaseError>;
@@ -99,11 +109,14 @@ impl Database {
     }
 
     /// Fetch notes matching ANY of a set of tags, in a single DB snapshot.
+    ///
+    /// Returns the notes plus the effective cursor used (see
+    /// [`DatabaseBackend::fetch_notes_by_tags`]).
     pub async fn fetch_notes_by_tags(
         &self,
         tags: &[NoteTag],
         cursor: u64,
-    ) -> Result<Vec<StoredNote>, DatabaseError> {
+    ) -> Result<(Vec<StoredNote>, u64), DatabaseError> {
         self.backend.fetch_notes_by_tags(tags, cursor).await
     }
 
@@ -430,7 +443,7 @@ mod tests {
         );
 
         // === The fix: single-snapshot multi-tag query ===
-        let snapshot = db.fetch_notes_by_tags(&[TAG_A.into(), TAG_B.into()], 0).await.unwrap();
+        let (snapshot, _) = db.fetch_notes_by_tags(&[TAG_A.into(), TAG_B.into()], 0).await.unwrap();
         assert_eq!(
             snapshot.len(),
             3,
@@ -472,10 +485,68 @@ mod tests {
             "legacy microsecond cursor should be reset to 0, returning the note"
         );
 
-        // Sanity check: a non-legacy cursor above the note's seq should NOT trigger the reset.
-        let normal_cursor: u64 = 1_000;
-        let empty = db.fetch_notes(TAG_LOCAL_ANY.into(), normal_cursor).await.unwrap();
-        assert_eq!(empty.len(), 0, "normal cursor > seq should filter correctly");
+        // Sanity check: a caught-up client's cursor (== the note's own seq, i.e.
+        // the current high-water) is NOT reset and filters correctly to empty.
+        // Note: a cursor STRICTLY above the high-water is treated as stranded and
+        // reset — see `test_fetch_notes_resets_cursor_stranded_above_high_water`.
+        let all = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        let caught_up_cursor = u64::try_from(all[0].seq).expect("seq is non-negative");
+        let empty = db.fetch_notes(TAG_LOCAL_ANY.into(), caught_up_cursor).await.unwrap();
+        assert_eq!(
+            empty.len(),
+            0,
+            "caught-up cursor (== high-water) filters correctly and does not reset"
+        );
+    }
+
+    /// A cursor STRICTLY ABOVE the current `seq` high-water can only exist if the
+    /// server's seq space regressed beneath a client's stored cursor (the backing
+    /// DB was recreated and AUTOINCREMENT restarted low). Such a cursor is below
+    /// the legacy-timestamp threshold, so the legacy guard never fires; without
+    /// the stranded reset it would match `seq > cursor` = nothing, forever.
+    #[tokio::test]
+    async fn test_fetch_notes_resets_cursor_stranded_above_high_water() {
+        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
+            .await
+            .unwrap();
+
+        // Populate the current epoch with two notes (high-water becomes their max seq).
+        for details in [vec![1u8], vec![2u8]] {
+            db.store_note(&StoredNote {
+                header: test_note_header(),
+                details,
+                created_at: Utc::now(),
+                seq: 0,
+                after_block_num: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        let all = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        assert_eq!(all.len(), 2, "sanity: both notes present in this epoch");
+        let high_water = u64::try_from(all[1].seq).expect("seq is non-negative");
+
+        // Caught-up client (cursor == high-water) must NOT reset — else it would
+        // re-deliver the whole backlog on every steady-state poll.
+        let caught_up = db.fetch_notes(TAG_LOCAL_ANY.into(), high_water).await.unwrap();
+        assert_eq!(caught_up.len(), 0, "caught-up cursor must not be reset");
+
+        // Stranded cursor (well above high-water, far below the 1e12 legacy
+        // threshold) resets to 0, recovers the epoch, and reports effective 0 so
+        // the caller can heal the client's stored cursor.
+        let stranded = high_water + 5_000;
+        let (recovered, effective) =
+            db.fetch_notes_by_tags(&[TAG_LOCAL_ANY.into()], stranded).await.unwrap();
+        assert_eq!(
+            recovered.len(),
+            2,
+            "cursor above high-water must reset to 0 and recover the epoch"
+        );
+        assert_eq!(
+            effective, 0,
+            "effective cursor must be 0 so the echoed response cursor heals the client"
+        );
     }
 
     /// Pagination: a response is capped at `FETCH_NOTES_BATCH_SIZE` rows. A
