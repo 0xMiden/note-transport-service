@@ -9,8 +9,8 @@ Please see the `miden-note-transport-proto` crate for the employed Protobuf mess
 Clients can interact with the server,
 - `send_note()` receives an incoming note and stores it in the database. The note details can be
 encrypted;
-- `fetch_notes()` process a notes-request by note tag, with pagination based on a timestamp. The
-node timestamps notes when it receives them (on `send_note()` requests);
+- `fetch_notes()` processes a notes-request by note tag, with pagination based on the
+server-assigned monotonic `seq` cursor returned by previous fetch responses;
 - `stream_notes()` is a subscription mechanism by note tag for real-time note-fetching. Received notes by the
 node are sent to subscribed client;
 - `stats()` provides simple insights into database statistics.
