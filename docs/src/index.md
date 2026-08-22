@@ -23,8 +23,8 @@ It is based on a client-node (or, client-server) architecture, where clients exc
 
 The flow is as follows,
 1. User sends a note to the node;
-2. The note is stored for a retention period (default 30 days, configurable via the [`--retention-days`](https://github.com/0xMiden/note-transport-service/blob/main/bin/node/src/main.rs) CLI flag). The node also labels the note with an increasing-monotonic integer cursor (currently a timestamp);
-3. The recipient fetches notes by note tag. To reduce the number of fetched notes (pagination), the user may employ the cursor (only notes after this value will be provided).
+2. The note is stored for a retention period (default 30 days, configurable via the [`--retention-days`](https://github.com/0xMiden/note-transport-service/blob/main/bin/node/src/main.rs) CLI flag). The node also labels the note with a server-assigned monotonic `seq` cursor;
+3. The recipient fetches notes by note tag. To reduce the number of fetched notes (pagination), the user may employ the cursor returned by the server (only notes with a higher `seq` value will be provided).
 
 The node itself may also be referred to as the transport service.
 
