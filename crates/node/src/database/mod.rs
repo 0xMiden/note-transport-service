@@ -11,6 +11,11 @@ use crate::types::{NoteTag, StoredNote};
 pub(crate) const FETCH_NOTES_MAX_ROWS: u32 = 500;
 /// Hard upper bound for one stored envelope and one fetched page.
 pub const FETCH_NOTES_MAX_BYTES: usize = 3 * 1024 * 1024;
+pub(crate) const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
+
+pub(crate) fn normalize_fetch_cursor(cursor: u64) -> u64 {
+    if cursor > LEGACY_CURSOR_THRESHOLD { 0 } else { cursor }
+}
 
 /// Result of storing an opaque note envelope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,7 +128,12 @@ impl Database {
         cursor: u64,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
         self.backend
-            .fetch_notes_by_tags(tags, cursor, FETCH_NOTES_MAX_ROWS, FETCH_NOTES_MAX_BYTES)
+            .fetch_notes_by_tags(
+                tags,
+                normalize_fetch_cursor(cursor),
+                FETCH_NOTES_MAX_ROWS,
+                FETCH_NOTES_MAX_BYTES,
+            )
             .await
     }
 
@@ -209,6 +219,9 @@ mod tests {
         let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
         assert_eq!(fetched.len(), 2);
         assert!(fetched[0].seq < fetched[1].seq);
+
+        let legacy_cursor = LEGACY_CURSOR_THRESHOLD + 1;
+        assert_eq!(db.fetch_notes(TAG_LOCAL_ANY.into(), legacy_cursor).await.unwrap().len(), 2);
     }
 
     #[tokio::test]

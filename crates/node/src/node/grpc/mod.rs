@@ -27,7 +27,7 @@ use tower::timeout::TimeoutLayer;
 use tower_http::cors::{Any, CorsLayer};
 
 use self::streaming::{NoteStreamer, StreamerMessage, Sub, Subface};
-use crate::database::Database;
+use crate::database::{Database, normalize_fetch_cursor};
 use crate::metrics::MetricsGrpc;
 
 /// Upper bound on the number of tags a client may include in a single
@@ -41,7 +41,6 @@ use crate::metrics::MetricsGrpc;
 /// A realistic wallet tracks O(10) to O(100) tags; 128 is generous without
 /// being an attack surface.
 const MAX_TAGS_PER_FETCH_REQUEST: usize = 128;
-const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
 
 /// Miden Note Transport gRPC server
 pub struct GrpcServer {
@@ -256,11 +255,7 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         // and the previous per-tag loop happened to dedupe via BTreeSet.
         let tag_set: BTreeSet<_> = request_data.tags.into_iter().collect();
         let tags: Vec<crate::types::NoteTag> = tag_set.into_iter().map(Into::into).collect();
-        let cursor = if request_data.cursor > LEGACY_CURSOR_THRESHOLD {
-            0
-        } else {
-            request_data.cursor
-        };
+        let cursor = normalize_fetch_cursor(request_data.cursor);
 
         let span = tracing::Span::current();
         span.record("tag_count", tags.len());
@@ -422,13 +417,13 @@ mod tests {
         let first = server
             .fetch_notes(tonic::Request::new(FetchNotesRequest {
                 tags: vec![TAG_LOCAL_ANY],
-                cursor: LEGACY_CURSOR_THRESHOLD + 1,
+                cursor: crate::database::LEGACY_CURSOR_THRESHOLD + 1,
             }))
             .await
             .unwrap()
             .into_inner();
         assert_eq!(first.notes.len(), crate::database::FETCH_NOTES_MAX_ROWS as usize);
-        assert!(first.cursor < LEGACY_CURSOR_THRESHOLD);
+        assert!(first.cursor < crate::database::LEGACY_CURSOR_THRESHOLD);
 
         let second = server
             .fetch_notes(tonic::Request::new(FetchNotesRequest {
