@@ -66,7 +66,6 @@ impl DatabaseMaintenance {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use serial_test::serial;
 
     use super::*;
     use crate::metrics::Metrics;
@@ -84,7 +83,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn test_cleanup_old_notes_no_retention() {
         let config = DatabaseConfig { retention_days: 0, ..Default::default() };
 
@@ -100,7 +98,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn test_cleanup_old_notes_retention() {
         let config = DatabaseConfig { retention_days: 7, ..Default::default() };
 
@@ -116,7 +113,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn test_cleanup_old_notes_mixed_ages() {
         let config = DatabaseConfig { retention_days: 1, ..Default::default() };
 

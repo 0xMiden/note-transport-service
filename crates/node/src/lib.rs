@@ -12,8 +12,8 @@
 //! - metrics and traces, exported through the OpenTelemetry framework for monitoring.
 //!
 //! ## Database
-//! Notes are stored in a database, implementing the
-//! [`Database`](`crate::database::DatabaseBackend`). A SQLite-based  implementation is provided.
+//! Notes are stored through [`Database`](`crate::database::Database`). The storage contract is
+//! private to this crate, and SQLite provides the current implementation.
 //!
 //! ### Maintenance
 //! A periodic task [`DatabaseMaintenance`](`crate::database::DatabaseMaintenance`) takes care of

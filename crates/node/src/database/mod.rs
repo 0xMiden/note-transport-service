@@ -10,40 +10,17 @@ use crate::types::{NoteId, NoteTag, StoredNote};
 
 /// Database operations
 #[async_trait::async_trait]
-pub trait DatabaseBackend: Send + Sync {
-    /// Connect to the database
-    async fn connect(
-        config: DatabaseConfig,
-        metrics: MetricsDatabase,
-    ) -> Result<Self, DatabaseError>
-    where
-        Self: Sized;
-
-    /// Store a new note
+trait DatabaseBackend: Send + Sync {
     async fn store_note(&self, note: &StoredNote) -> Result<(), DatabaseError>;
 
-    /// Fetch notes by tag
-    async fn fetch_notes(
-        &self,
-        tag: NoteTag,
-        cursor: u64,
-    ) -> Result<Vec<StoredNote>, DatabaseError>;
-
-    /// Fetch notes matching ANY of a set of tags, in a single DB snapshot.
-    ///
-    /// This is the preferred multi-tag query — running per-tag queries back
-    /// to back reopens a race where a concurrent INSERT can land between two
-    /// per-tag queries and get leapfrogged by the cursor advance.
     async fn fetch_notes_by_tags(
         &self,
         tags: &[NoteTag],
         cursor: u64,
     ) -> Result<Vec<StoredNote>, DatabaseError>;
 
-    /// Clean up old notes based on retention policy
     async fn cleanup_old_notes(&self, retention_days: u32) -> Result<u64, DatabaseError>;
 
-    /// Check if a note exists
     async fn note_exists(&self, note_id: NoteId) -> Result<bool, DatabaseError>;
 }
 
@@ -76,7 +53,7 @@ impl Database {
         config: DatabaseConfig,
         metrics: MetricsDatabase,
     ) -> Result<Self, DatabaseError> {
-        let backend = SqliteDatabase::connect(config, metrics).await?;
+        let backend = SqliteDatabase::connect(&config.url, metrics).await?;
         Ok(Self { backend: Box::new(backend) })
     }
 
@@ -92,7 +69,7 @@ impl Database {
         tag: NoteTag,
         cursor: u64,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
-        self.backend.fetch_notes(tag, cursor).await
+        self.backend.fetch_notes_by_tags(&[tag], cursor).await
     }
 
     /// Fetch notes matching ANY of a set of tags, in a single DB snapshot.
@@ -123,12 +100,7 @@ mod tests {
     use crate::metrics::Metrics;
     use crate::test_utils::{TAG_LOCAL_ANY, test_note_header, test_note_header_with_tag};
 
-    #[tokio::test]
-    async fn test_sqlite_database() {
-        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
-            .await
-            .unwrap();
-
+    async fn backend_contract(db: Database) {
         let note = StoredNote {
             header: test_note_header(),
             details: vec![1, 2, 3, 4],
@@ -144,9 +116,15 @@ mod tests {
         assert_eq!(fetched_notes.len(), 1);
         assert_eq!(fetched_notes[0].header.id(), note.header.id());
         assert!(fetched_notes[0].seq > 0);
-
-        // Test note exists
         assert!(db.note_exists(note.header.id()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn sqlite_backend_contract() {
+        let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
+            .await
+            .unwrap();
+        backend_contract(db).await;
     }
 
     #[tokio::test]
