@@ -12,7 +12,6 @@ use crate::metrics::MetricsDatabase;
 use crate::types::{NoteTag, StoredNote};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("src/database/sqlite/migrations");
-const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
 
 pub struct SqliteDatabase {
     pool: SqlitePool,
@@ -152,8 +151,7 @@ impl DatabaseBackend for SqliteDatabase {
             timer.finish("ok");
             return Ok(Vec::new());
         }
-        let effective_cursor = if cursor > LEGACY_CURSOR_THRESHOLD { 0 } else { cursor };
-        let cursor = i64::try_from(effective_cursor).map_err(|_| {
+        let cursor = i64::try_from(cursor).map_err(|_| {
             DatabaseError::QueryExecution("cursor exceeds SQLite range".to_string())
         })?;
         let max_bytes = i64::try_from(max_bytes)
