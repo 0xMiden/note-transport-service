@@ -58,4 +58,8 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 
 # General
-rand = { workspace = true }
+blake3 = { workspace = true }
+rand   = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

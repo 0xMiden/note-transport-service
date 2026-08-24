@@ -84,9 +84,9 @@ The current server implementation does not use the request cursor to initialize 
 
 ## Storage and retention
 
-The node uses SQLite and embedded migrations. File-backed databases use a larger connection pool. In-memory databases use a single connection because SQLite `:memory:` databases are isolated per connection.
+The node uses SQLite with explicit schema migration. The serving process checks migration versions and checksums without changing the schema. In-memory databases are reserved for tests.
 
-Notes older than the configured retention period are removed by a maintenance task.
+Storage tracks retained payload bytes and rejects writes above the configured limit. Fetches have row and byte limits. Operators remove one bounded batch of expired notes with the cleanup command.
 
 ## Block context
 

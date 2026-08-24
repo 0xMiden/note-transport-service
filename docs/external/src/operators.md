@@ -19,35 +19,47 @@ This installs the `miden-note-transport-node` binary.
 
 ## Run the node
 
-The default configuration binds to localhost and stores notes in an in-memory SQLite database:
+Create or update the database before starting the service:
 
 ```bash
-miden-note-transport-node
+miden-note-transport-node migrate \
+  --database-url /var/lib/miden-note-transport/node.db
 ```
 
-For a reachable node with persistent storage:
+Then start the service:
 
 ```bash
-miden-note-transport-node \
+miden-note-transport-node serve \
   --host 0.0.0.0 \
   --port 57292 \
   --database-url /var/lib/miden-note-transport/node.db \
-  --retention-days 30
+  --max-storage-bytes 1073741824
 ```
 
-## CLI flags
+The service checks the migration version and checksum at startup. It does not apply migrations.
+
+Run bounded retention cleanup as a separate operation:
+
+```bash
+miden-note-transport-node cleanup \
+  --database-url /var/lib/miden-note-transport/node.db \
+  --retention-days 30 \
+  --max-rows 1000
+```
+
+## Serve flags
 
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--host` | `127.0.0.1` | Address to bind to. |
 | `--port` | `57292` | gRPC port. |
-| `--database-url` | `:memory:` | SQLite database URL or file path. Use a file path for persistence. |
-| `--retention-days` | `30` | How long to retain notes before cleanup. |
-| `--max-note-size` | `512000` | Maximum note details size in bytes. |
+| `--database-url` | required | Existing SQLite database path. It can also come from `MNT_DATABASE_URL`. |
+| `--max-note-size` | `512000` | Maximum envelope size in bytes. |
 | `--max-connections` | `4096` | Maximum concurrent gRPC connections. |
 | `--request-timeout` | `4` | Per-request timeout in seconds. |
+| `--max-storage-bytes` | required | Maximum retained payload bytes. It can also come from `MNT_MAX_STORAGE_BYTES`. |
 
-The CLI flags above are parsed as command-line arguments. They are not currently read from `DATABASE_URL` or similarly named environment variables.
+The `migrate` command requires `--database-url`. The `cleanup` command also accepts `--retention-days` and `--max-rows`.
 
 ## Telemetry and logging
 
@@ -66,7 +78,10 @@ Example:
 OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317 \
 JSON_LOGGING=true \
 RUST_LOG=INFO \
-miden-note-transport-node --host 0.0.0.0 --database-url /var/lib/miden-note-transport/node.db
+miden-note-transport-node serve \
+  --host 0.0.0.0 \
+  --database-url /var/lib/miden-note-transport/node.db \
+  --max-storage-bytes 1073741824
 ```
 
 ## Docker Compose
@@ -85,7 +100,7 @@ make docker-node-down
 
 to stop the stack.
 
-The Compose node service passes `--database-url /app/data/node.db` and mounts `/app/data` on the `node_data` volume, so note storage survives container restarts. Compose forwards either supported OTLP endpoint variable from the host environment or `.env` file.
+Compose runs the migration command before it starts the node. Both services mount `/app/data` on the `node_data` volume. Compose forwards either supported OTLP endpoint variable from the host environment or `.env` file.
 
 ## Ports
 
@@ -97,12 +112,12 @@ The gRPC server exposes the note transport API and the health service on port `5
 
 ## Database behavior
 
-Use a file-backed SQLite path for production-like deployments. The default `:memory:` database is useful for local testing but loses all notes on restart.
+The serving process requires an existing file-backed SQLite database. In-memory storage is available only to tests.
 
-The node runs embedded migrations at startup. The current schema stores note IDs with a uniqueness constraint and uses a monotonic `seq` column for pagination.
+The database assigns monotonic cursors and tracks retained payload bytes in the same write transaction. An identical envelope retry succeeds without adding another row. Fetches and cleanup are bounded by their configured limits.
 
 ## Operational cautions
 
-Treat debug logs as sensitive because note IDs and tags can be correlated with user activity. Configure the retention period to cover the expected offline window for users.
+Treat debug logs as sensitive because note IDs and tags can be correlated with user activity. Set cleanup retention to cover the expected offline window for users.
 
-Monitor request errors because duplicate note IDs and invalid note headers are rejected. Use `FetchNotes` for durable catch-up before relying on streaming for live updates.
+Monitor request errors because invalid headers, unsealed details, and writes over either storage limit are rejected. Use `FetchNotes` for durable catch-up before relying on streaming for live updates.

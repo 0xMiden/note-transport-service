@@ -26,4 +26,8 @@ pub enum DatabaseError {
     /// Deserialization error
     #[error("Deserialization error: {0}")]
     Deserialization(String),
+
+    /// Configured storage capacity was reached.
+    #[error("Storage capacity exhausted: {0}")]
+    Capacity(String),
 }

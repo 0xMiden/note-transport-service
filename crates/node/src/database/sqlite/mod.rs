@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -6,12 +7,16 @@ use miden_protocol::utils::serde::{Deserializable, Serializable};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
-use super::{DatabaseBackend, DatabaseError};
+use super::{
+    DatabaseBackend,
+    DatabaseError,
+    StoreResult,
+    envelope_digest,
+    validate_sealed_details,
+};
 use crate::metrics::MetricsDatabase;
-use crate::types::{NoteId, NoteTag, StoredNote};
+use crate::types::{NoteTag, StoredNote};
 
-pub(crate) const FETCH_NOTES_BATCH_SIZE: i64 = 500;
-const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("src/database/sqlite/migrations");
 
 pub struct SqliteDatabase {
@@ -20,79 +25,141 @@ pub struct SqliteDatabase {
 }
 
 impl SqliteDatabase {
-    pub async fn connect(url: &str, metrics: MetricsDatabase) -> Result<Self, DatabaseError> {
-        let normalized = normalize_url(url);
-        let is_memory = normalized == "sqlite::memory:";
-        let options = SqliteConnectOptions::from_str(&normalized)
-            .map_err(|error| DatabaseError::Configuration(error.to_string()))?
-            .create_if_missing(true)
-            .foreign_keys(true)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .synchronous(sqlx::sqlite::SqliteSynchronous::Full)
-            .busy_timeout(std::time::Duration::from_secs(30));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(if is_memory { 1 } else { 16 })
-            .connect_with(options)
-            .await
-            .map_err(connection_error)?;
-        verify_supported_schema(&pool).await?;
-        MIGRATOR.run(&pool).await.map_err(migration_error)?;
+    pub async fn connect(
+        url: &str,
+        allow_in_memory: bool,
+        metrics: MetricsDatabase,
+    ) -> Result<Self, DatabaseError> {
+        let pool = open_pool(url, allow_in_memory, false).await?;
+        verify_schema(&pool).await?;
+        let retained: i64 =
+            sqlx::query_scalar("SELECT retained_bytes FROM storage_metadata WHERE singleton = 1")
+                .fetch_one(&pool)
+                .await
+                .map_err(query_error)?;
+        metrics.record_retained_bytes(u64::try_from(retained).unwrap_or(0));
         Ok(Self { pool, metrics })
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn connect_and_migrate_for_test(
+        url: &str,
+        metrics: MetricsDatabase,
+    ) -> Result<Self, DatabaseError> {
+        let pool = open_pool(url, true, true).await?;
+        MIGRATOR.run(&pool).await.map_err(migration_error)?;
+        finalize_migration(&pool).await?;
+        Ok(Self { pool, metrics })
+    }
+
+    pub async fn migrate(url: &str, allow_in_memory: bool) -> Result<(), DatabaseError> {
+        let pool = open_pool(url, allow_in_memory, true).await?;
+        MIGRATOR.run(&pool).await.map_err(migration_error)?;
+        finalize_migration(&pool).await
     }
 }
 
 #[async_trait::async_trait]
 impl DatabaseBackend for SqliteDatabase {
     #[tracing::instrument(skip(self, note), fields(operation = "db.store_note"))]
-    async fn store_note(&self, note: &StoredNote) -> Result<(), DatabaseError> {
+    async fn store_note(
+        &self,
+        note: &StoredNote,
+        max_retained_bytes: u64,
+    ) -> Result<StoreResult, DatabaseError> {
         let timer = self.metrics.db_store_note();
-        sqlx::query(
-            "INSERT INTO notes (id, tag, header, details, created_at, after_block_num) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+        let digest = envelope_digest(note);
+        let mut tx = self.pool.begin().await.map_err(query_error)?;
+
+        sqlx::query("UPDATE storage_metadata SET next_cursor = next_cursor WHERE singleton = 1")
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
+
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM notes WHERE envelope_digest = ?)")
+                .bind(digest.as_slice())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(query_error)?;
+        let current_retained: i64 =
+            sqlx::query_scalar("SELECT retained_bytes FROM storage_metadata WHERE singleton = 1")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(query_error)?;
+        if exists {
+            tx.rollback().await.map_err(query_error)?;
+            self.metrics.record_retained_bytes(u64::try_from(current_retained).unwrap_or(0));
+            timer.finish("ok");
+            return Ok(StoreResult::AlreadyPresent);
+        }
+
+        let retained_bytes = i64::try_from(note.header.to_bytes().len() + note.details.len())
+            .map_err(|_| DatabaseError::Serialization("note is too large".to_string()))?;
+        let next_retained = current_retained
+            .checked_add(retained_bytes)
+            .ok_or_else(|| DatabaseError::Capacity("retained byte count overflow".to_string()))?;
+        if u64::try_from(next_retained).unwrap_or(u64::MAX) > max_retained_bytes {
+            return Err(DatabaseError::Capacity(format!(
+                "accepting this envelope would exceed the {max_retained_bytes} byte limit"
+            )));
+        }
+        let seq: i64 = sqlx::query_scalar(
+            "UPDATE storage_metadata \
+             SET next_cursor = next_cursor + 1, retained_bytes = retained_bytes + ? \
+             WHERE singleton = 1 RETURNING next_cursor - 1",
         )
+        .bind(retained_bytes)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(query_error)?;
+
+        sqlx::query(
+            "INSERT INTO notes \
+             (seq, envelope_digest, id, tag, header, details, created_at, after_block_num) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(seq)
+        .bind(digest.as_slice())
         .bind(note.header.id().as_bytes().as_slice())
         .bind(i64::from(note.header.metadata().tag().as_u32()))
         .bind(note.header.to_bytes())
         .bind(&note.details)
         .bind(note.created_at.timestamp_micros())
         .bind(note.after_block_num.map(i64::from))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(query_error)?;
+
+        tx.commit().await.map_err(query_error)?;
+        self.metrics
+            .record_retained_bytes(u64::try_from(next_retained).unwrap_or(u64::MAX));
         timer.finish("ok");
-        Ok(())
+        Ok(StoreResult::Inserted)
     }
 
-    #[tracing::instrument(skip(self, tags), fields(
-        operation = "db.fetch_notes_by_tags",
-        tag_count = tags.len(),
-        cursor,
-        notes_returned = tracing::field::Empty,
-    ))]
     async fn fetch_notes_by_tags(
         &self,
         tags: &[NoteTag],
         cursor: u64,
+        max_rows: u32,
+        max_bytes: usize,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
         let timer = self.metrics.db_fetch_notes();
         if tags.is_empty() {
             timer.finish("ok");
             return Ok(Vec::new());
         }
-
-        let effective_cursor = if cursor > LEGACY_CURSOR_THRESHOLD {
-            self.metrics.db_fetch_notes_legacy_cursor_reset();
-            tracing::info!(original_cursor = cursor, "Legacy cursor reset to 0");
-            0
-        } else {
-            cursor
-        };
-        let cursor = i64::try_from(effective_cursor).map_err(|_| {
+        let cursor = i64::try_from(cursor).map_err(|_| {
             DatabaseError::QueryExecution("cursor exceeds SQLite range".to_string())
         })?;
+        let max_bytes = i64::try_from(max_bytes)
+            .map_err(|_| DatabaseError::QueryExecution("byte limit is too large".to_string()))?;
 
         let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT seq, header, details, created_at, after_block_num \
+            "SELECT seq, header, details, created_at, after_block_num FROM (\
+             SELECT seq, header, details, created_at, after_block_num, \
+             SUM(LENGTH(header) + LENGTH(details)) OVER (ORDER BY seq) AS running_bytes \
              FROM notes WHERE seq > ",
         );
         query.push_bind(cursor).push(" AND tag IN (");
@@ -100,140 +167,196 @@ impl DatabaseBackend for SqliteDatabase {
         for tag in tags {
             separated.push_bind(i64::from(tag.as_u32()));
         }
-        separated.push_unseparated(") ORDER BY seq LIMIT ");
-        query.push_bind(FETCH_NOTES_BATCH_SIZE);
+        separated.push_unseparated(") ");
+        query
+            .push("ORDER BY seq) WHERE running_bytes <= ")
+            .push_bind(max_bytes)
+            .push(" ORDER BY seq LIMIT ")
+            .push_bind(i64::from(max_rows));
 
         let rows = query.build().fetch_all(&self.pool).await.map_err(query_error)?;
-        let notes: Result<Vec<_>, _> = rows.iter().map(row_to_note).collect();
-        let notes = notes?;
-        tracing::Span::current().record("notes_returned", notes.len());
+        let notes = rows.iter().map(row_to_note).collect();
         timer.finish("ok");
-        Ok(notes)
+        notes
     }
 
-    async fn cleanup_old_notes(&self, retention_days: u32) -> Result<u64, DatabaseError> {
+    async fn cleanup_old_notes(
+        &self,
+        retention_days: u32,
+        max_rows: u32,
+    ) -> Result<u64, DatabaseError> {
         let cutoff =
             (Utc::now() - chrono::Duration::days(i64::from(retention_days))).timestamp_micros();
-        let result = sqlx::query("DELETE FROM notes WHERE created_at < ?")
-            .bind(cutoff)
-            .execute(&self.pool)
+        let mut tx = self.pool.begin().await.map_err(query_error)?;
+        sqlx::query("UPDATE storage_metadata SET next_cursor = next_cursor WHERE singleton = 1")
+            .execute(&mut *tx)
             .await
             .map_err(query_error)?;
-        Ok(result.rows_affected())
-    }
-
-    async fn note_exists(&self, note_id: NoteId) -> Result<bool, DatabaseError> {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?)")
-            .bind(note_id.as_bytes().as_slice())
-            .fetch_one(&self.pool)
-            .await
-            .map_err(query_error)
+        let rows = sqlx::query(
+            "SELECT seq, LENGTH(header) + LENGTH(details) AS retained_bytes \
+             FROM notes WHERE created_at < ? ORDER BY seq LIMIT ?",
+        )
+        .bind(cutoff)
+        .bind(i64::from(max_rows))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if rows.is_empty() {
+            tx.rollback().await.map_err(query_error)?;
+            return Ok(0);
+        }
+        let seqs: Vec<i64> = rows.iter().map(|row| row.get("seq")).collect();
+        let removed_bytes: i64 = rows.iter().map(|row| row.get::<i64, _>("retained_bytes")).sum();
+        let mut delete = QueryBuilder::<Sqlite>::new("DELETE FROM notes WHERE seq IN (");
+        let mut separated = delete.separated(", ");
+        for seq in &seqs {
+            separated.push_bind(seq);
+        }
+        separated.push_unseparated(")");
+        delete.build().execute(&mut *tx).await.map_err(query_error)?;
+        let retained: i64 = sqlx::query_scalar(
+            "UPDATE storage_metadata SET retained_bytes = retained_bytes - ? \
+             WHERE singleton = 1 RETURNING retained_bytes",
+        )
+        .bind(removed_bytes)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        tx.commit().await.map_err(query_error)?;
+        self.metrics.record_retained_bytes(u64::try_from(retained).unwrap_or(0));
+        Ok(seqs.len() as u64)
     }
 }
 
+async fn open_pool(
+    url: &str,
+    allow_in_memory: bool,
+    create_if_missing: bool,
+) -> Result<SqlitePool, DatabaseError> {
+    let is_memory = url == "sqlite::memory:";
+    if is_memory && !allow_in_memory {
+        return Err(DatabaseError::Configuration(
+            "in-memory SQLite is only available to tests".to_string(),
+        ));
+    }
+    if !is_memory {
+        let path = sqlite_path(url)?;
+        if !create_if_missing && !path.exists() {
+            return Err(DatabaseError::Configuration(format!(
+                "SQLite database does not exist: {}. Run the migrate command first",
+                path.display()
+            )));
+        }
+    }
+    let normalized = normalize_url(url);
+    let options = SqliteConnectOptions::from_str(&normalized)
+        .map_err(|error| DatabaseError::Configuration(error.to_string()))?
+        .create_if_missing(create_if_missing)
+        .foreign_keys(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Full)
+        .busy_timeout(std::time::Duration::from_secs(30));
+    SqlitePoolOptions::new()
+        .max_connections(if is_memory { 1 } else { 16 })
+        .connect_with(options)
+        .await
+        .map_err(connection_error)
+}
+
 fn normalize_url(url: &str) -> String {
-    if url == ":memory:" {
-        "sqlite::memory:".to_string()
-    } else if url.starts_with("sqlite:") {
+    if url.starts_with("sqlite:") {
         url.to_string()
     } else {
         format!("sqlite://{url}")
     }
 }
 
-async fn verify_supported_schema(pool: &SqlitePool) -> Result<(), DatabaseError> {
-    let table_sql: Option<String> =
-        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'notes'")
-            .fetch_optional(pool)
-            .await
-            .map_err(query_error)?;
-    let Some(table_sql) = table_sql else {
-        return Ok(());
-    };
-
-    let columns = sqlx::query("PRAGMA table_info(notes)")
-        .fetch_all(pool)
-        .await
-        .map_err(query_error)?;
-    let expected = [
-        ("seq", "INTEGER", 0_i64, 1_i64),
-        ("id", "BLOB", 1, 0),
-        ("tag", "INTEGER", 1, 0),
-        ("header", "BLOB", 1, 0),
-        ("details", "BLOB", 1, 0),
-        ("created_at", "INTEGER", 1, 0),
-        ("after_block_num", "INTEGER", 0, 0),
-    ];
-    let columns_match = columns.len() == expected.len()
-        && columns.iter().zip(expected).all(|(row, expected)| {
-            let actual = (
-                row.try_get::<String, _>("name"),
-                row.try_get::<String, _>("type"),
-                row.try_get::<i64, _>("notnull"),
-                row.try_get::<i64, _>("pk"),
-            );
-            match actual {
-                (Ok(name), Ok(kind), Ok(not_null), Ok(primary_key)) => {
-                    (name.as_str(), kind.as_str(), not_null, primary_key) == expected
-                },
-                _ => false,
-            }
-        });
-    let normalized_sql =
-        table_sql.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
-    let cursor_is_monotonic = normalized_sql.contains("SEQ INTEGER PRIMARY KEY AUTOINCREMENT");
-    let is_strict: bool = sqlx::query_scalar(
-        "SELECT strict = 1 FROM pragma_table_list WHERE schema = 'main' AND name = 'notes'",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(query_error)?;
-    let id_is_unique = has_exact_index(pool, "id", true).await?;
-    let tag_cursor_index = has_exact_index(pool, "tag,seq", false).await?;
-    let created_at_index = has_exact_index(pool, "created_at", false).await?;
-
-    if columns_match
-        && cursor_is_monotonic
-        && is_strict
-        && id_is_unique
-        && tag_cursor_index
-        && created_at_index
-    {
-        Ok(())
-    } else {
-        Err(DatabaseError::Migration(
-            "unsupported legacy SQLite schema; upgrade it with the previous release first"
-                .to_string(),
-        ))
+fn sqlite_path(url: &str) -> Result<&Path, DatabaseError> {
+    let path = url.strip_prefix("sqlite://").unwrap_or(url);
+    if path.is_empty() {
+        return Err(DatabaseError::Configuration("SQLite path is empty".to_string()));
     }
+    Ok(Path::new(path))
 }
 
-async fn has_exact_index(
-    pool: &SqlitePool,
-    columns: &str,
-    must_be_unique: bool,
-) -> Result<bool, DatabaseError> {
-    sqlx::query_scalar(
-        "SELECT EXISTS(\
-         SELECT 1 FROM pragma_index_list('notes') AS indexes \
-         WHERE (SELECT group_concat(name, ',') FROM pragma_index_info(indexes.name)) = ? \
-         AND indexes.partial = 0 \
-         AND (? = 0 OR indexes.[unique] = 1))",
+async fn verify_schema(pool: &SqlitePool) -> Result<(), DatabaseError> {
+    let applied = sqlx::query(
+        "SELECT version, checksum FROM _sqlx_migrations WHERE success = 1 ORDER BY version",
     )
-    .bind(columns)
-    .bind(i64::from(must_be_unique))
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
-    .map_err(query_error)
+    .map_err(|_| {
+        DatabaseError::Migration("database is not migrated; run the migrate command".to_string())
+    })?;
+    let expected: Vec<_> = MIGRATOR.iter().collect();
+    let current = applied.len() == expected.len()
+        && applied.iter().zip(expected).all(|(row, migration)| {
+            let version: Result<i64, _> = row.try_get("version");
+            let checksum: Result<Vec<u8>, _> = row.try_get("checksum");
+            version.is_ok_and(|value| value == migration.version)
+                && checksum.is_ok_and(|value| value == migration.checksum.as_ref())
+        });
+    if !current {
+        return Err(DatabaseError::Migration(
+            "database schema is not current; run the migrate command".to_string(),
+        ));
+    }
+    let incomplete: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE envelope_digest IS NULL")
+            .fetch_one(pool)
+            .await
+            .map_err(query_error)?;
+    if incomplete != 0 {
+        return Err(DatabaseError::Migration(
+            "database migration is incomplete; rerun the migrate command".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn finalize_migration(pool: &SqlitePool) -> Result<(), DatabaseError> {
+    let rows = sqlx::query(
+        "SELECT seq, header, details, created_at, after_block_num \
+         FROM notes WHERE envelope_digest IS NULL ORDER BY seq",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(query_error)?;
+    let mut tx = pool.begin().await.map_err(query_error)?;
+    for row in &rows {
+        let note = row_to_note(row)?;
+        validate_sealed_details(&note)?;
+        if note.header.to_bytes().len() + note.details.len() > super::FETCH_NOTES_MAX_BYTES {
+            return Err(DatabaseError::Migration(format!(
+                "note at cursor {} exceeds the V1 envelope limit",
+                note.seq
+            )));
+        }
+        let digest = envelope_digest(&note);
+        sqlx::query("UPDATE notes SET envelope_digest = ? WHERE seq = ?")
+            .bind(digest.as_slice())
+            .bind(note.seq)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
+    }
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_envelope_digest ON notes(envelope_digest)",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(query_error)?;
+    tx.commit().await.map_err(query_error)
 }
 
 fn row_to_note(row: &SqliteRow) -> Result<StoredNote, DatabaseError> {
     let header_bytes: Vec<u8> = row.try_get("header").map_err(query_error)?;
     let header = NoteHeader::read_from_bytes(&header_bytes)
         .map_err(|error| DatabaseError::Deserialization(error.to_string()))?;
-    let timestamp: i64 = row.try_get("created_at").map_err(query_error)?;
-    let created_at = DateTime::from_timestamp_micros(timestamp)
-        .ok_or_else(|| DatabaseError::Deserialization(format!("invalid timestamp: {timestamp}")))?;
+    let created_at_micros: i64 = row.try_get("created_at").map_err(query_error)?;
+    let created_at = DateTime::from_timestamp_micros(created_at_micros).ok_or_else(|| {
+        DatabaseError::Deserialization(format!("invalid timestamp: {created_at_micros}"))
+    })?;
     let after_block_num: Option<i64> = row.try_get("after_block_num").map_err(query_error)?;
     Ok(StoredNote {
         header,
@@ -273,101 +396,19 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn rejects_unsupported_legacy_schema_before_serving() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query(
-            "CREATE TABLE notes (\
-             id BLOB PRIMARY KEY, tag INTEGER NOT NULL, header BLOB NOT NULL, \
-             details BLOB NOT NULL, created_at INTEGER NOT NULL)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+    async fn serving_rejects_a_migration_checksum_mismatch() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let url = file.path().to_string_lossy();
+        SqliteDatabase::migrate(&url, false).await.unwrap();
+        let pool = open_pool(&url, false, false).await.unwrap();
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00'")
+            .execute(&pool)
+            .await
+            .unwrap();
 
-        let error = verify_supported_schema(&pool).await.unwrap_err();
+        let error = verify_schema(&pool)
+            .await
+            .expect_err("a changed migration must not be accepted");
         assert!(matches!(error, DatabaseError::Migration(_)));
-        pool.close().await;
-    }
-
-    #[tokio::test]
-    async fn rejects_non_monotonic_cursor_schema_with_current_columns() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query(
-            "CREATE TABLE notes (\
-             seq INTEGER PRIMARY KEY, id BLOB NOT NULL UNIQUE, tag INTEGER NOT NULL, \
-             header BLOB NOT NULL, details BLOB NOT NULL, created_at INTEGER NOT NULL, \
-             after_block_num INTEGER)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("CREATE INDEX idx_notes_tag_seq ON notes(tag, seq)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("CREATE INDEX idx_notes_created_at ON notes(created_at)")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let error = verify_supported_schema(&pool).await.unwrap_err();
-        assert!(matches!(error, DatabaseError::Migration(_)));
-        pool.close().await;
-    }
-
-    #[tokio::test]
-    async fn rejects_partial_note_id_uniqueness() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query(
-            "CREATE TABLE notes (\
-             seq INTEGER PRIMARY KEY AUTOINCREMENT, id BLOB NOT NULL, tag INTEGER NOT NULL, \
-             header BLOB NOT NULL, details BLOB NOT NULL, created_at INTEGER NOT NULL, \
-             after_block_num INTEGER) STRICT",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("CREATE UNIQUE INDEX idx_notes_id ON notes(id) WHERE 0")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("CREATE INDEX idx_notes_tag_seq ON notes(tag, seq)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("CREATE INDEX idx_notes_created_at ON notes(created_at)")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let error = verify_supported_schema(&pool).await.unwrap_err();
-        assert!(matches!(error, DatabaseError::Migration(_)));
-        pool.close().await;
-    }
-
-    #[tokio::test]
-    async fn rejects_non_strict_schema() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query(
-            "CREATE TABLE notes (\
-             seq INTEGER PRIMARY KEY AUTOINCREMENT, id BLOB NOT NULL UNIQUE, \
-             tag INTEGER NOT NULL, header BLOB NOT NULL, details BLOB NOT NULL, \
-             created_at INTEGER NOT NULL, after_block_num INTEGER)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("CREATE INDEX idx_notes_tag_seq ON notes(tag, seq)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("CREATE INDEX idx_notes_created_at ON notes(created_at)")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let error = verify_supported_schema(&pool).await.unwrap_err();
-        assert!(matches!(error, DatabaseError::Migration(_)));
-        pool.close().await;
     }
 }

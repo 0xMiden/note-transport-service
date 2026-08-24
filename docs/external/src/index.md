@@ -44,9 +44,9 @@ Private note contents are not published on-chain. The chain stores note commitme
 
 - **No chain-state validation.** The node does not connect to a Miden node and does not prove that a stored note was committed on-chain.
 - **No block context yet.** The current API does not attach commitment block numbers, note metadata, or inclusion proofs to fetched notes. This is tracked in [0xMiden/note-transport-service#68](https://github.com/0xMiden/note-transport-service/issues/68).
-- **Duplicate notes are rejected.** SQLite stores note IDs with a uniqueness constraint. Sending the same note twice fails instead of creating duplicate rows.
+- **Retries are idempotent.** Sending the same complete envelope twice succeeds without creating another row.
 - **Cursor values are server-owned.** Fetch pagination uses the monotonic SQLite `seq` value returned by the server. Clients should persist returned cursors, not fabricate them.
 
 ## Current implementation
 
-The current node implementation is a Rust gRPC service backed by SQLite. It stores each note with a monotonic `seq` value assigned at insert time, uses that value for `FetchNotes` pagination, and can export traces and metrics through OpenTelemetry.
+The current node implementation is a Rust gRPC service backed by SQLite. It stores each envelope under a monotonic cursor, uses that cursor for `FetchNotes` pagination, and can export traces and metrics through OpenTelemetry.

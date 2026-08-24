@@ -16,8 +16,9 @@ use miden_note_transport_proto::miden_note_transport::v1::{
     StreamNotesRequest,
     TransportNote,
 };
+use miden_protocol::crypto::ies::SealedMessage;
 use miden_protocol::utils::serde::Deserializable;
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::mpsc;
 use tonic::Status;
 use tonic_web::GrpcWebLayer;
@@ -62,6 +63,8 @@ pub struct GrpcServerConfig {
     pub max_connections: usize,
     /// Connection timeout in seconds
     pub request_timeout: usize,
+    /// Maximum bytes retained by storage.
+    pub max_storage_bytes: u64,
 }
 
 /// Streaming task interface context
@@ -78,6 +81,7 @@ impl Default for GrpcServerConfig {
             max_note_size: 512_000,
             max_connections: 4096,
             request_timeout: 4,
+            max_storage_bytes: 1024 * 1024 * 1024,
         }
     }
 }
@@ -175,6 +179,11 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
                 tracing::warn!(reason = "invalid_header", "send_note rejected");
                 Status::invalid_argument(format!("Invalid header: {e:?}"))
             })?;
+        if SealedMessage::read_from_bytes(&pnote.details).is_err() {
+            return Err(Status::invalid_argument(
+                "note details are not a valid sealed message",
+            ));
+        }
 
         tracing::debug!(
             note_id = %header.id(),
@@ -194,8 +203,14 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         };
 
         self.database
-            .store_note(&note_for_db)
-            .await.map_err(|e| tonic::Status::internal(format!("Failed to store note: {e:?}")))?;
+            .store_note(&note_for_db, self.config.max_storage_bytes)
+            .await
+            .map_err(|error| match error {
+                crate::database::DatabaseError::Capacity(message) => {
+                    tonic::Status::resource_exhausted(message)
+                },
+                error => tonic::Status::internal(format!("Failed to store note: {error:?}")),
+            })?;
 
         timer.finish("ok");
 
@@ -328,14 +343,12 @@ mod tests {
     use miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_server::MidenNoteTransport;
 
     use super::*;
-    use crate::database::{Database, DatabaseConfig};
+    use crate::database::Database;
     use crate::metrics::Metrics;
 
     async fn test_server() -> GrpcServer {
         let metrics = Metrics::default();
-        let db = Arc::new(
-            Database::connect(DatabaseConfig::default(), metrics.db.clone()).await.unwrap(),
-        );
+        let db = Arc::new(Database::connect_for_test(metrics.db.clone()).await.unwrap());
         GrpcServer::new(db, GrpcServerConfig::default(), metrics.grpc)
     }
 
