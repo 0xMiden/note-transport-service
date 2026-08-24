@@ -51,6 +51,7 @@ sqlx = { default-features = false, features = [
   "chrono",
   "macros",
   "migrate",
+  "postgres",
   "runtime-tokio-rustls",
   "sqlite",
 ], version = "0.8" }
