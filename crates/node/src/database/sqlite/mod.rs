@@ -142,27 +142,52 @@ fn normalize_url(url: &str) -> String {
 }
 
 async fn verify_supported_schema(pool: &SqlitePool) -> Result<(), DatabaseError> {
-    let has_notes: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notes')",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(query_error)?;
-    if !has_notes {
+    let table_sql: Option<String> =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'notes'")
+            .fetch_optional(pool)
+            .await
+            .map_err(query_error)?;
+    let Some(table_sql) = table_sql else {
         return Ok(());
-    }
+    };
 
     let columns = sqlx::query("PRAGMA table_info(notes)")
         .fetch_all(pool)
         .await
         .map_err(query_error)?;
-    let has_column = |name: &str| {
-        columns
-            .iter()
-            .any(|row| row.try_get::<String, _>("name").is_ok_and(|column| column == name))
-    };
-    let required = ["seq", "id", "tag", "header", "details", "created_at", "after_block_num"];
-    if required.into_iter().all(has_column) {
+    let expected = [
+        ("seq", "INTEGER", 0_i64, 1_i64),
+        ("id", "BLOB", 1, 0),
+        ("tag", "INTEGER", 1, 0),
+        ("header", "BLOB", 1, 0),
+        ("details", "BLOB", 1, 0),
+        ("created_at", "INTEGER", 1, 0),
+        ("after_block_num", "INTEGER", 0, 0),
+    ];
+    let columns_match = columns.len() == expected.len()
+        && columns.iter().zip(expected).all(|(row, expected)| {
+            let actual = (
+                row.try_get::<String, _>("name"),
+                row.try_get::<String, _>("type"),
+                row.try_get::<i64, _>("notnull"),
+                row.try_get::<i64, _>("pk"),
+            );
+            match actual {
+                (Ok(name), Ok(kind), Ok(not_null), Ok(primary_key)) => {
+                    (name.as_str(), kind.as_str(), not_null, primary_key) == expected
+                },
+                _ => false,
+            }
+        });
+    let normalized_sql =
+        table_sql.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
+    let cursor_is_monotonic = normalized_sql.contains("SEQ INTEGER PRIMARY KEY AUTOINCREMENT");
+    let id_is_unique = has_exact_index(pool, "id", true).await?;
+    let tag_cursor_index = has_exact_index(pool, "tag,seq", false).await?;
+    let created_at_index = has_exact_index(pool, "created_at", false).await?;
+
+    if columns_match && cursor_is_monotonic && id_is_unique && tag_cursor_index && created_at_index
+    {
         Ok(())
     } else {
         Err(DatabaseError::Migration(
@@ -170,6 +195,24 @@ async fn verify_supported_schema(pool: &SqlitePool) -> Result<(), DatabaseError>
                 .to_string(),
         ))
     }
+}
+
+async fn has_exact_index(
+    pool: &SqlitePool,
+    columns: &str,
+    must_be_unique: bool,
+) -> Result<bool, DatabaseError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(\
+         SELECT 1 FROM pragma_index_list('notes') AS indexes \
+         WHERE (SELECT group_concat(name, ',') FROM pragma_index_info(indexes.name)) = ? \
+         AND (? = 0 OR indexes.[unique] = 1))",
+    )
+    .bind(columns)
+    .bind(i64::from(must_be_unique))
+    .fetch_one(pool)
+    .await
+    .map_err(query_error)
 }
 
 fn row_to_note(row: &SqliteRow) -> Result<StoredNote, DatabaseError> {
@@ -228,6 +271,31 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+
+        let error = verify_supported_schema(&pool).await.unwrap_err();
+        assert!(matches!(error, DatabaseError::Migration(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_non_monotonic_cursor_schema_with_current_columns() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE notes (\
+             seq INTEGER PRIMARY KEY, id BLOB NOT NULL UNIQUE, tag INTEGER NOT NULL, \
+             header BLOB NOT NULL, details BLOB NOT NULL, created_at INTEGER NOT NULL, \
+             after_block_num INTEGER)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE INDEX idx_notes_tag_seq ON notes(tag, seq)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE INDEX idx_notes_created_at ON notes(created_at)")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let error = verify_supported_schema(&pool).await.unwrap_err();
         assert!(matches!(error, DatabaseError::Migration(_)));
