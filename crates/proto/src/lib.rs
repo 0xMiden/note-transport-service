@@ -14,5 +14,8 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 
 // Convenient re-exports for commonly used types
 pub mod miden_note_transport {
-    pub use super::generated::miden_note_transport::*;
+    /// Version 1 of the note transport API.
+    pub mod v1 {
+        pub use super::super::generated::miden_note_transport_v1::*;
+    }
 }

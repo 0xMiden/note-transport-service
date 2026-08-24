@@ -3,23 +3,14 @@
 Node/server implementation of the Miden Transport Layer for private notes.
 
 ## API
-Messages exchanged with the protocol using gRPC.
-Please see the `miden-note-transport-proto` crate for the employed Protobuf messages and services.
 
-Clients can interact with the server,
-- `send_note()` receives an incoming note and stores it in the database. The note details can be
-encrypted;
-- `fetch_notes()` process a notes-request by note tag, with pagination based on a timestamp. The
-node timestamps notes when it receives them (on `send_note()` requests);
-- `stream_notes()` is a subscription mechanism by note tag for real-time note-fetching. Received notes by the
-node are sent to subscribed client;
-- `stats()` provides simple insights into database statistics.
+The node uses gRPC messages from the `miden-note-transport-proto` crate. `send_note()` stores an incoming note in the database. Note details may be encrypted.
+
+`fetch_notes()` returns a page for the requested note tags and cursor. `stream_notes()` keeps a subscription open for one tag and sends note updates to that client.
 
 ## Telemetry
 Metrics and traces to monitor the node state are provided.
-While metrics provide insights into general requests stats, traces can provide insights into specific
-requests.
-Metrics and traces can be exported following using the [OpenTelemetry](https://opentelemetry.io) framework.
+Metrics report aggregate request data, while traces describe specific requests. The node exports both through [OpenTelemetry](https://opentelemetry.io).
 
 ## License
 This project is [MIT licensed](../../LICENSE).

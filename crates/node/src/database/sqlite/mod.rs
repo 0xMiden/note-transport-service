@@ -213,24 +213,6 @@ impl DatabaseBackend for SqliteDatabase {
         Ok(stored_notes)
     }
 
-    async fn get_stats(&self) -> Result<(u64, u64), DatabaseError> {
-        let (total_notes, total_tags): (i64, i64) = self
-            .query("get stats", |conn| {
-                #[allow(deprecated)]
-                use diesel::dsl::count_distinct;
-                use schema::notes::dsl::{notes, tag};
-
-                let total_notes: i64 = notes.count().get_result(conn)?;
-                #[allow(deprecated)]
-                let total_tags: i64 = notes.select(count_distinct(tag)).first(conn)?;
-
-                Ok((total_notes, total_tags))
-            })
-            .await?;
-
-        Ok((total_notes.try_into().unwrap_or(0), total_tags.try_into().unwrap_or(0)))
-    }
-
     async fn cleanup_old_notes(&self, retention_days: u32) -> Result<u64, DatabaseError> {
         let cutoff_date = Utc::now() - chrono::Duration::days(i64::from(retention_days));
         let cutoff_timestamp = cutoff_date.timestamp_micros();

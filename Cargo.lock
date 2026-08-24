@@ -1967,7 +1967,6 @@ dependencies = [
  "miden-note-transport-proto-build",
  "miette",
  "prost 0.14.4",
- "prost-types",
  "tonic 0.14.6",
  "tonic-prost",
  "tonic-prost-build",

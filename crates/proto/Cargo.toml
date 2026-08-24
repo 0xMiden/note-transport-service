@@ -15,7 +15,6 @@ workspace = true
 
 [dependencies]
 prost       = { workspace = true }
-prost-types = { workspace = true }
 tonic       = { features = ["codegen"], workspace = true }
 tonic-prost = { workspace = true }
 

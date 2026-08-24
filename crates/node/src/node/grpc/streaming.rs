@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use miden_note_transport_proto::miden_note_transport::{StreamNotesUpdate, TransportNote};
+use miden_note_transport_proto::miden_note_transport::v1::{StreamNotesUpdate, TransportNote};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 
