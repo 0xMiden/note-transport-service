@@ -306,6 +306,38 @@ mod tests {
 
         drop(postgres);
         reset_postgres(&url).await;
+
+        let batched_file = tempfile::NamedTempFile::new().unwrap();
+        let batched_url = batched_file.path().to_string_lossy().into_owned();
+        let batched_config = DatabaseConfig::new(&batched_url);
+        Database::migrate(&batched_config).await.unwrap();
+        let batched_sqlite =
+            Database::connect(batched_config.clone(), Metrics::default().db).await.unwrap();
+        let mut expected = Vec::new();
+        for value in 0..=FETCH_NOTES_MAX_ROWS {
+            let envelope = note(&value.to_le_bytes());
+            batched_sqlite.store_note(&envelope, u64::MAX).await.unwrap();
+            expected.push(envelope);
+        }
+        assert_eq!(
+            Database::copy_sqlite_to_postgres(&batched_config, &config, Metrics::default().db)
+                .await
+                .unwrap(),
+            u64::from(FETCH_NOTES_MAX_ROWS) + 1
+        );
+        let postgres = Database::connect(config.clone(), Metrics::default().db).await.unwrap();
+        let mut copied = postgres.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        assert_eq!(copied.len(), FETCH_NOTES_MAX_ROWS as usize);
+        let cursor = u64::try_from(copied.last().unwrap().seq).unwrap();
+        copied.extend(postgres.fetch_notes(TAG_LOCAL_ANY.into(), cursor).await.unwrap());
+        assert_eq!(copied.len(), expected.len());
+        for (index, (actual, source)) in copied.iter().zip(expected).enumerate() {
+            assert_eq!(actual.seq, i64::try_from(index).unwrap() + 1);
+            assert_eq!(actual.details, source.details);
+        }
+
+        drop(postgres);
+        reset_postgres(&url).await;
         let postgres = Database::connect(config, Metrics::default().db).await.unwrap();
         backend_contract(&postgres).await;
         let mut expired = note(&[4]);
