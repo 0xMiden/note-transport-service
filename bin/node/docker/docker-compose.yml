@@ -27,6 +27,7 @@ services:
 
   copy-sqlite:
     profiles: [upgrade]
+    user: root
     build:
       context: .
       dockerfile: bin/node/docker/Dockerfile
@@ -37,7 +38,7 @@ services:
       migrate:
         condition: service_completed_successfully
     volumes:
-      - node_data:/legacy:ro
+      - node_data:/legacy
 
   note-transport:
     build:
