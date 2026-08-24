@@ -102,6 +102,10 @@ docker-node-down:
 docker-node-restart:
 	docker compose -f bin/node/docker/docker-compose.yml --project-directory . restart
 
+.PHONY: docker-node-copy-sqlite
+docker-node-copy-sqlite:
+	docker compose -f bin/node/docker/docker-compose.yml --project-directory . run --rm copy-sqlite
+
 
 # --- installing ----------------------------------------------------------------------------------
 

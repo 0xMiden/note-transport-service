@@ -124,6 +124,21 @@ to stop the stack.
 
 Compose waits for PostgreSQL, runs the migration command, and starts the node as an unprivileged user. PostgreSQL data remains in the `postgres_data` volume. Compose forwards either supported OTLP endpoint variable from the host environment or `.env` file.
 
+To upgrade an existing Compose deployment that used the `node_data` SQLite volume, stop the old stack before updating the checkout:
+
+```bash
+make docker-node-down
+```
+
+After updating the checkout, copy the database and start the new stack:
+
+```bash
+make docker-node-copy-sqlite
+make docker-node-up
+```
+
+The copy target starts PostgreSQL, applies its migrations, reads `node.db` from the existing `node_data` volume, and verifies the copy. Run these commands from the same checkout path or with the same Compose project name that created the old volume. Keep `node_data` until the rollback window ends.
+
 ## Ports
 
 | Port | Service |

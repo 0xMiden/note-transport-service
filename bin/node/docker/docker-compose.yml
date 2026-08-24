@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: note_transport
       POSTGRES_PASSWORD: local-only
@@ -24,6 +25,20 @@ services:
       postgres:
         condition: service_healthy
 
+  copy-sqlite:
+    profiles: [upgrade]
+    build:
+      context: .
+      dockerfile: bin/node/docker/Dockerfile
+    command: ["copy", "--sqlite", "/legacy/node.db"]
+    environment:
+      MNT_DATABASE_URL: postgres://note_transport:local-only@postgres/note_transport
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - node_data:/legacy:ro
+
   note-transport:
     build:
       context: .
@@ -45,4 +60,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  node_data:
   postgres_data:
