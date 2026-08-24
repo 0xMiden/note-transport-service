@@ -48,7 +48,7 @@ workspace-check: ## Runs a check that all packages have `lints.workspace = true`
 
 
 .PHONY: lint
-lint: format fix clippy toml workspace-check ## Runs all linting tasks at once (Clippy, fixing, formatting, workspace)
+lint: format-check toml-check typos-check workspace-check clippy ## Runs all lint checks without modifying files
 
 # --- docs ----------------------------------------------------------------------------------------
 
@@ -76,6 +76,10 @@ doc-test: ## Runs doc tests
 .PHONY: check
 check: ## Check all targets and features for errors without code generation
 	$(BUILD_PROTO) cargo check --all-targets --locked --workspace
+
+.PHONY: check-features
+check-features: ## Checks each feature in isolation with warnings denied
+	@scripts/check-features.sh
 
 # --- building ------------------------------------------------------------------------------------
 
