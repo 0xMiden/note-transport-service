@@ -41,6 +41,7 @@ use crate::metrics::MetricsGrpc;
 /// A realistic wallet tracks O(10) to O(100) tags; 128 is generous without
 /// being an attack surface.
 const MAX_TAGS_PER_FETCH_REQUEST: usize = 128;
+const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
 
 /// Miden Note Transport gRPC server
 pub struct GrpcServer {
@@ -255,7 +256,11 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         // and the previous per-tag loop happened to dedupe via BTreeSet.
         let tag_set: BTreeSet<_> = request_data.tags.into_iter().collect();
         let tags: Vec<crate::types::NoteTag> = tag_set.into_iter().map(Into::into).collect();
-        let cursor = request_data.cursor;
+        let cursor = if request_data.cursor > LEGACY_CURSOR_THRESHOLD {
+            0
+        } else {
+            request_data.cursor
+        };
 
         let span = tracing::Span::current();
         span.record("tag_count", tags.len());
@@ -345,11 +350,17 @@ mod tests {
     use super::*;
     use crate::database::Database;
     use crate::metrics::Metrics;
+    use crate::test_utils::{TAG_LOCAL_ANY, test_note_header};
+    use crate::types::StoredNote;
 
-    async fn test_server() -> GrpcServer {
+    async fn test_server_with_database() -> (GrpcServer, Arc<Database>) {
         let metrics = Metrics::default();
         let db = Arc::new(Database::connect_for_test(metrics.db.clone()).await.unwrap());
-        GrpcServer::new(db, GrpcServerConfig::default(), metrics.grpc)
+        (GrpcServer::new(db.clone(), GrpcServerConfig::default(), metrics.grpc), db)
+    }
+
+    async fn test_server() -> GrpcServer {
+        test_server_with_database().await.0
     }
 
     /// A client sending more tags than `MAX_TAGS_PER_FETCH_REQUEST` is rejected
@@ -387,5 +398,47 @@ mod tests {
         let response = result.expect("request at the cap must succeed").into_inner();
         assert_eq!(response.notes.len(), 0, "DB is empty, no notes returned");
         assert_eq!(response.cursor, 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_cursor_advances_across_pages() {
+        let (server, database) = test_server_with_database().await;
+        for _ in 0..=crate::database::FETCH_NOTES_MAX_ROWS {
+            database
+                .store_note(
+                    &StoredNote {
+                        header: test_note_header(),
+                        details: vec![1],
+                        created_at: Utc::now(),
+                        seq: 0,
+                        after_block_num: None,
+                    },
+                    u64::MAX,
+                )
+                .await
+                .unwrap();
+        }
+
+        let first = server
+            .fetch_notes(tonic::Request::new(FetchNotesRequest {
+                tags: vec![TAG_LOCAL_ANY],
+                cursor: LEGACY_CURSOR_THRESHOLD + 1,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(first.notes.len(), crate::database::FETCH_NOTES_MAX_ROWS as usize);
+        assert!(first.cursor < LEGACY_CURSOR_THRESHOLD);
+
+        let second = server
+            .fetch_notes(tonic::Request::new(FetchNotesRequest {
+                tags: vec![TAG_LOCAL_ANY],
+                cursor: first.cursor,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(second.notes.len(), 1);
+        assert!(second.cursor > first.cursor);
     }
 }

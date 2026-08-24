@@ -209,9 +209,6 @@ mod tests {
         let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
         assert_eq!(fetched.len(), 2);
         assert!(fetched[0].seq < fetched[1].seq);
-
-        let legacy_cursor = 1_000_000_000_001;
-        assert_eq!(db.fetch_notes(TAG_LOCAL_ANY.into(), legacy_cursor).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
