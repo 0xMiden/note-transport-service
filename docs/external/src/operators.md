@@ -56,7 +56,7 @@ Telemetry is configured through environment variables:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | OTLP endpoint for trace and metric export. Setting it enables export. |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Optional OTLP endpoint used only for traces. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Shared OTLP endpoint that takes precedence when both endpoint variables are set. |
 | `JSON_LOGGING` | `false` | Emits JSON logs when set to `true`. |
 | `RUST_LOG` | `INFO` | Standard Rust tracing filter. |
 
@@ -85,7 +85,7 @@ make docker-node-down
 
 to stop the stack.
 
-The Compose node service passes `--database-url /app/data/node.db` and mounts `/app/data` on the `node_data` volume, so note storage survives container restarts. Operators can set an OTLP endpoint for their external collector.
+The Compose node service passes `--database-url /app/data/node.db` and mounts `/app/data` on the `node_data` volume, so note storage survives container restarts. Compose forwards either supported OTLP endpoint variable from the host environment or `.env` file.
 
 ## Ports
 

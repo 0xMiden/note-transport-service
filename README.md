@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Miden Note Transport service stores private note envelopes until a recipient fetches them. It supports asynchronous note exchange between Miden clients.
+The Miden Note Transport service stores private note envelopes for a configured retention period. Recipients fetch retained envelopes with durable cursors, so fetching an envelope does not delete it.
 
 The workspace contains the node library and its protobuf runtime and build crates. The `miden-note-transport-node` binary runs the server.
 

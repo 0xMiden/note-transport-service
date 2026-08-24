@@ -8,6 +8,8 @@ services:
     command: ["miden-note-transport-node", "--host", "0.0.0.0", "--database-url", "/app/data/node.db"]
     environment:
       - JSON_LOGGING=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
       - RUST_LOG=INFO
       - DOCKER_ENV=true
     volumes:
