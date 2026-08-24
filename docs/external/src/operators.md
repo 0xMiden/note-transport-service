@@ -55,16 +55,15 @@ Telemetry is configured through environment variables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `OTEL_ENABLED` | `false` | Enables OpenTelemetry export when set to `true`. |
-| `OTEL_TRACES_ENDPOINT` | `http://localhost:4317` | OTLP endpoint for trace and metric export. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | OTLP endpoint for trace and metric export. Setting it enables export. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Optional OTLP endpoint used only for traces. |
 | `JSON_LOGGING` | `false` | Emits JSON logs when set to `true`. |
 | `RUST_LOG` | `INFO` | Standard Rust tracing filter. |
 
 Example:
 
 ```bash
-OTEL_ENABLED=true \
-OTEL_TRACES_ENDPOINT=http://otel-collector:4317 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317 \
 JSON_LOGGING=true \
 RUST_LOG=INFO \
 miden-note-transport-node --host 0.0.0.0 --database-url /var/lib/miden-note-transport/node.db
@@ -72,19 +71,11 @@ miden-note-transport-node --host 0.0.0.0 --database-url /var/lib/miden-note-tran
 
 ## Docker Compose
 
-The repository includes a Docker Compose setup for the node plus telemetry services:
+The repository includes a Docker Compose setup for the node with persistent SQLite storage:
 
 ```bash
 make docker-node-up
 ```
-
-This starts:
-
-- note transport node;
-- OpenTelemetry Collector;
-- Tempo;
-- Prometheus;
-- Grafana.
 
 Use:
 
@@ -94,20 +85,15 @@ make docker-node-down
 
 to stop the stack.
 
-The Compose node service passes `--database-url /app/data/node.db` and mounts `/app/data` on the `node_data` volume, so note storage survives container restarts.
+The Compose node service passes `--database-url /app/data/node.db` and mounts `/app/data` on the `node_data` volume, so note storage survives container restarts. Operators can set an OTLP endpoint for their external collector.
 
 ## Ports
 
 | Port | Service |
 | --- | --- |
 | `57292` | Note transport gRPC API. |
-| `4317` | OTLP gRPC receiver in the collector. |
-| `4318` | OTLP HTTP receiver in the collector. |
-| `3000` | Grafana. |
-| `9090` | Prometheus. |
-| `3200` | Tempo. |
 
-The note transport node exposes gRPC health through the same gRPC server, not a separate HTTP health port.
+The gRPC server exposes the note transport API and the health service on port `57292`.
 
 ## Database behavior
 
@@ -117,7 +103,6 @@ The node runs embedded migrations at startup. The current schema stores note IDs
 
 ## Operational cautions
 
-- Treat debug logs as sensitive. Note IDs and tags can be correlated with user activity.
-- Configure a retention period that matches the expected offline window for your users.
-- Monitor request errors. Duplicate note IDs or invalid note headers are rejected.
-- Use `FetchNotes` for durable catch-up. Streaming is best used as a live update channel after a fetch cycle.
+Treat debug logs as sensitive because note IDs and tags can be correlated with user activity. Configure the retention period to cover the expected offline window for users.
+
+Monitor request errors because duplicate note IDs and invalid note headers are rejected. Use `FetchNotes` for durable catch-up before relying on streaming for live updates.
