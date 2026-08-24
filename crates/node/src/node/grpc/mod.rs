@@ -1,6 +1,10 @@
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -16,8 +20,11 @@ use miden_note_transport_proto::miden_note_transport::v1::{
 };
 use miden_protocol::crypto::ies::SealedMessage;
 use miden_protocol::utils::serde::Deserializable;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tonic::Status;
+use tonic::codegen::tokio_stream::Stream;
+use tonic::transport::server::{Connected, TcpIncoming};
 use tonic_web::GrpcWebLayer;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower::timeout::TimeoutLayer;
@@ -102,6 +109,15 @@ impl GrpcServer {
 
     /// gRPC server running-task
     pub async fn serve(self) -> crate::Result<()> {
+        let addr = format!("{}:{}", self.config.host, self.config.port)
+            .parse::<SocketAddr>()
+            .map_err(|e| crate::Error::Internal(format!("Invalid address: {e}")))?;
+        let incoming = TcpIncoming::bind(addr)
+            .map_err(|e| crate::Error::Internal(format!("Failed to bind {addr}: {e}")))?;
+        self.serve_with_incoming(incoming).await
+    }
+
+    async fn serve_with_incoming(self, incoming: TcpIncoming) -> crate::Result<()> {
         let (health_reporter, health_svc) = tonic_health::server::health_reporter();
         health_reporter
             .set_service_status("", tonic_health::ServingStatus::Serving)
@@ -134,17 +150,23 @@ impl GrpcServer {
                 crate::Error::Internal(format!("Failed to build reflection service: {e}"))
             })?;
 
-        let addr = format!("{}:{}", self.config.host, self.config.port)
-            .parse::<SocketAddr>()
-            .map_err(|e| crate::Error::Internal(format!("Invalid address: {e}")))?;
-
         let cors = CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any);
         let max_connections = u32::try_from(self.config.max_connections).map_err(|_| {
             crate::Error::Internal("max connections exceeds the HTTP/2 stream limit".to_string())
         })?;
         let request_timeout = self.config.request_timeout;
-        let shutdown = self.shutdown.clone();
-        let mut drain_shutdown = self.shutdown.subscribe();
+        let signal_shutdown = self.shutdown.clone();
+        let serve_shutdown = self.shutdown.subscribe();
+        let drain_shutdown = self.shutdown.subscribe();
+        let (force_shutdown, _) = watch::channel(false);
+        let incoming = ShutdownIncoming::new(incoming, force_shutdown.clone());
+        let signal_task = tokio::spawn(shutdown_signal(signal_shutdown));
+        let drain_task = tokio::spawn(async move {
+            wait_for_shutdown(drain_shutdown).await;
+            tokio::time::sleep(Duration::from_secs(request_timeout.saturating_add(1) as u64)).await;
+            tracing::warn!("graceful shutdown deadline reached; closing remaining connections");
+            force_shutdown.send_replace(true);
+        });
 
         let server = tonic::transport::Server::builder()
             .accept_http1(true)
@@ -158,25 +180,11 @@ impl GrpcServer {
             .add_service(health_svc)
             .add_service(reflection_svc)
             .add_service(self.into_service())
-            .serve_with_shutdown(addr, shutdown_signal(shutdown));
-        let drain_deadline = async move {
-            while !*drain_shutdown.borrow() {
-                if drain_shutdown.changed().await.is_err() {
-                    return;
-                }
-            }
-            tokio::time::sleep(Duration::from_secs(request_timeout.saturating_add(1) as u64)).await;
-        };
-
-        tokio::select! {
-            result = server => {
-                result.map_err(|e| crate::Error::Internal(format!("Server error: {e}")))
-            },
-            () = drain_deadline => {
-                tracing::warn!("graceful shutdown deadline reached; closing remaining connections");
-                Ok(())
-            },
-        }
+            .serve_with_incoming_shutdown(incoming, wait_for_shutdown(serve_shutdown));
+        let result = server.await.map_err(|e| crate::Error::Internal(format!("Server error: {e}")));
+        signal_task.abort();
+        drain_task.abort();
+        result
     }
 }
 
@@ -184,6 +192,101 @@ async fn database_is_ready(database: &Database) -> bool {
     tokio::time::timeout(READINESS_TIMEOUT, database.is_ready())
         .await
         .unwrap_or(false)
+}
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    while !*shutdown.borrow() {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+struct ShutdownIncoming {
+    inner: TcpIncoming,
+    force_shutdown: watch::Sender<bool>,
+}
+
+impl ShutdownIncoming {
+    fn new(inner: TcpIncoming, force_shutdown: watch::Sender<bool>) -> Self {
+        Self { inner, force_shutdown }
+    }
+}
+
+impl Stream for ShutdownIncoming {
+    type Item = io::Result<ShutdownIo>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx).map(|item| {
+            item.map(|result| {
+                result.map(|inner| ShutdownIo::new(inner, self.force_shutdown.subscribe()))
+            })
+        })
+    }
+}
+
+struct ShutdownIo {
+    inner: tokio::net::TcpStream,
+    force_shutdown: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl ShutdownIo {
+    fn new(inner: tokio::net::TcpStream, force_shutdown: watch::Receiver<bool>) -> Self {
+        Self {
+            inner,
+            force_shutdown: Box::pin(wait_for_shutdown(force_shutdown)),
+        }
+    }
+
+    fn poll_force_shutdown(&mut self, cx: &mut Context<'_>) -> io::Result<()> {
+        if self.force_shutdown.as_mut().poll(cx).is_ready() {
+            Err(io::Error::new(io::ErrorKind::ConnectionAborted, "server shutdown deadline"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl AsyncRead for ShutdownIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.poll_force_shutdown(cx)?;
+        Pin::new(&mut self.inner).poll_read(cx, buffer)
+    }
+}
+
+impl AsyncWrite for ShutdownIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        self.poll_force_shutdown(cx)?;
+        Pin::new(&mut self.inner).poll_write(cx, buffer)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        self.poll_force_shutdown(cx)?;
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl Connected for ShutdownIo {
+    type ConnectInfo = <tokio::net::TcpStream as Connected>::ConnectInfo;
+
+    fn connect_info(&self) -> Self::ConnectInfo {
+        self.inner.connect_info()
+    }
 }
 
 async fn set_api_health(reporter: &tonic_health::server::HealthReporter, ready: bool) {
@@ -737,6 +840,53 @@ mod tests {
             .await
             .expect("blocked error delivery ignored shutdown")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_deadline_closes_a_health_watch() {
+        let metrics = Metrics::default();
+        let database = Arc::new(Database::connect_for_test(metrics.db.clone()).await.unwrap());
+        let config = GrpcServerConfig {
+            request_timeout: 1,
+            ..GrpcServerConfig::default()
+        };
+        let server = GrpcServer::new(database, config, metrics.grpc);
+        let shutdown = server.shutdown.clone();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = incoming.local_addr().unwrap();
+        let mut server_task = tokio::spawn(server.serve_with_incoming(incoming));
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut client = tonic_health::pb::health_client::HealthClient::new(channel);
+        let mut health_watch = client
+            .watch(tonic::Request::new(tonic_health::pb::HealthCheckRequest {
+                service: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        health_watch.message().await.unwrap().unwrap();
+
+        shutdown.send_replace(true);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut server_task)
+                .await
+                .is_err(),
+            "the health watch must hold graceful shutdown open until the deadline",
+        );
+        tokio::time::timeout(Duration::from_secs(3), server_task)
+            .await
+            .expect("server exceeded its graceful shutdown deadline")
+            .unwrap()
+            .unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(1), health_watch.message())
+            .await
+            .expect("health connection remained open after the deadline");
+        assert!(closed.is_err() || closed.unwrap().is_none());
     }
 
     #[tokio::test]
