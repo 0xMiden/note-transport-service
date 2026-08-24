@@ -7,13 +7,12 @@ use std::time::Duration;
 
 use chrono::Utc;
 use miden_note_transport_proto::FILE_DESCRIPTOR_SET;
-use miden_note_transport_proto::miden_note_transport::miden_note_transport_server::MidenNoteTransportServer;
-use miden_note_transport_proto::miden_note_transport::{
+use miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_server::MidenNoteTransportServer;
+use miden_note_transport_proto::miden_note_transport::v1::{
     FetchNotesRequest,
     FetchNotesResponse,
     SendNoteRequest,
     SendNoteResponse,
-    StatsResponse,
     StreamNotesRequest,
     TransportNote,
 };
@@ -141,7 +140,7 @@ impl StreamerCtx {
 }
 
 #[tonic::async_trait]
-impl miden_note_transport_proto::miden_note_transport::miden_note_transport_server::MidenNoteTransport
+impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_server::MidenNoteTransport
     for GrpcServer
 {
     #[tracing::instrument(skip(self, request), fields(
@@ -310,25 +309,6 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         Ok(tonic::Response::new(sub))
     }
 
-    #[tracing::instrument(skip(self), fields(operation = "grpc.stats.request"))]
-    async fn stats(
-        &self,
-        _request: tonic::Request<()>,
-    ) -> Result<tonic::Response<StatsResponse>, tonic::Status> {
-        let (total_notes, total_tags) = self
-            .database
-            .get_stats()
-            .await.map_err(|e| tonic::Status::internal(format!("Failed to get stats: {e:?}")))?;
-
-        let response = StatsResponse {
-            total_notes,
-            total_tags,
-            notes_per_tag: Vec::new(), // TODO: Implement notes_per_tag
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        };
-
-        Ok(tonic::Response::new(response))
-    }
 }
 
 impl Drop for StreamerCtx {
@@ -344,8 +324,8 @@ impl Drop for StreamerCtx {
 mod tests {
     use std::sync::Arc;
 
-    use miden_note_transport_proto::miden_note_transport::FetchNotesRequest;
-    use miden_note_transport_proto::miden_note_transport::miden_note_transport_server::MidenNoteTransport;
+    use miden_note_transport_proto::miden_note_transport::v1::FetchNotesRequest;
+    use miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_server::MidenNoteTransport;
 
     use super::*;
     use crate::database::{Database, DatabaseConfig};

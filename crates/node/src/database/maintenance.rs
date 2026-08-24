@@ -70,7 +70,7 @@ mod tests {
 
     use super::*;
     use crate::metrics::Metrics;
-    use crate::test_utils::test_note_header;
+    use crate::test_utils::{TAG_LOCAL_ANY, test_note_header};
     use crate::types::StoredNote;
 
     fn note_at(age: Duration) -> StoredNote {
@@ -95,8 +95,8 @@ mod tests {
         tokio::spawn(maintenance.entrypoint());
         sleep(Duration::from_secs(2)).await;
 
-        let (total_notes, _) = db.get_stats().await.unwrap();
-        assert_eq!(total_notes, 0);
+        let notes = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        assert!(notes.is_empty());
     }
 
     #[tokio::test]
@@ -111,8 +111,8 @@ mod tests {
         tokio::spawn(maintenance.entrypoint());
         sleep(Duration::from_secs(2)).await;
 
-        let (total_notes, _) = db.get_stats().await.unwrap();
-        assert_eq!(total_notes, 1);
+        let notes = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        assert_eq!(notes.len(), 1);
     }
 
     #[tokio::test]
@@ -128,7 +128,7 @@ mod tests {
         tokio::spawn(maintenance.entrypoint());
         sleep(Duration::from_secs(2)).await;
 
-        let (total_notes, _) = db.get_stats().await.unwrap();
-        assert_eq!(total_notes, 1);
+        let notes = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        assert_eq!(notes.len(), 1);
     }
 }

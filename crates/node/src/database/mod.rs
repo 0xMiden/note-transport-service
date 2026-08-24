@@ -40,9 +40,6 @@ pub trait DatabaseBackend: Send + Sync {
         cursor: u64,
     ) -> Result<Vec<StoredNote>, DatabaseError>;
 
-    /// Get statistics about the database
-    async fn get_stats(&self) -> Result<(u64, u64), DatabaseError>;
-
     /// Clean up old notes based on retention policy
     async fn cleanup_old_notes(&self, retention_days: u32) -> Result<u64, DatabaseError>;
 
@@ -107,11 +104,6 @@ impl Database {
         self.backend.fetch_notes_by_tags(tags, cursor).await
     }
 
-    /// Get statistics about the database
-    pub async fn get_stats(&self) -> Result<(u64, u64), DatabaseError> {
-        self.backend.get_stats().await
-    }
-
     /// Clean up old notes based on retention policy
     pub async fn cleanup_old_notes(&self, retention_days: u32) -> Result<u64, DatabaseError> {
         self.backend.cleanup_old_notes(retention_days).await
@@ -155,11 +147,6 @@ mod tests {
 
         // Test note exists
         assert!(db.note_exists(note.header.id()).await.unwrap());
-
-        // Test stats
-        let (total_notes, total_tags) = db.get_stats().await.unwrap();
-        assert_eq!(total_notes, 1);
-        assert_eq!(total_tags, 1);
     }
 
     #[tokio::test]
@@ -255,9 +242,6 @@ mod tests {
             40,
             "all 40 concurrent writes should be visible"
         );
-
-        let (total, _) = db.get_stats().await.unwrap();
-        assert_eq!(total, 40, "stats should reflect all 40 rows");
     }
 
     #[tokio::test]
@@ -523,9 +507,7 @@ mod tests {
         let third = db.fetch_notes(TAG_LOCAL_ANY.into(), third_cursor).await.unwrap();
         assert_eq!(third.len(), 0, "drained");
 
-        // Stats reflect every row written.
-        let (total_stats, _) = db.get_stats().await.unwrap();
-        assert_eq!(usize::try_from(total_stats).unwrap(), total);
+        assert_eq!(first.len() + second.len(), total);
     }
 
     /// `after_block_num` survives the full round-trip: `StoredNote` →
@@ -536,7 +518,7 @@ mod tests {
     /// truncation at the `i32::MAX` boundary.
     #[tokio::test]
     async fn test_block_context_round_trips_through_store_and_fetch() {
-        use miden_note_transport_proto::miden_note_transport::TransportNote;
+        use miden_note_transport_proto::miden_note_transport::v1::TransportNote;
 
         let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
             .await

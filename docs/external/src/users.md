@@ -9,14 +9,14 @@ This page covers integrating with the note transport gRPC API.
 
 ## API surface
 
-The service is defined in `proto/proto/miden_note_transport.proto`.
+The service is defined in `proto/proto/miden_note_transport.proto` under the
+`miden_note_transport.v1` package.
 
 ```protobuf
 service MidenNoteTransport {
     rpc SendNote(SendNoteRequest) returns (SendNoteResponse);
     rpc FetchNotes(FetchNotesRequest) returns (FetchNotesResponse);
     rpc StreamNotes(StreamNotesRequest) returns (stream StreamNotesUpdate);
-    rpc Stats(google.protobuf.Empty) returns (StatsResponse);
 }
 ```
 
@@ -100,26 +100,6 @@ Current behavior to account for:
 - If a subscriber cannot keep up with the bounded channel, the subscription is dropped.
 
 On reconnect, run `FetchNotes` with your persisted cursor before opening a new stream.
-
-## Stats
-
-`Stats` returns aggregate counts:
-
-```protobuf
-message StatsResponse {
-    uint64 total_notes = 1;
-    uint64 total_tags = 2;
-    repeated TagStats notes_per_tag = 3;
-}
-
-message TagStats {
-    fixed32 tag = 1;
-    uint64 note_count = 2;
-    google.protobuf.Timestamp last_activity = 3;
-}
-```
-
-The current server returns `total_notes` and `total_tags`. Per-tag statistics are not populated yet.
 
 ## Client sync pattern
 

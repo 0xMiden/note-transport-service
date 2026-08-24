@@ -21,7 +21,7 @@ Private note contents are not published on-chain. The chain stores note commitme
     CLI flags, Docker Compose, telemetry, storage, ports, retention, and production cautions.
   </Card>
   <Card title="Users" href="./users" eyebrow="gRPC API">
-    Request and response shapes for send, fetch, stream, stats, plus the recommended client sync pattern.
+    Request and response shapes for each RPC, plus the recommended client sync pattern.
   </Card>
 </CardGrid>
 
@@ -32,7 +32,6 @@ Private note contents are not published on-chain. The chain stores note commitme
 | `SendNote` | Publish one transported note. | The `header` must decode as a Miden `NoteHeader`; `details` are stored as opaque bytes. |
 | `FetchNotes` | Durable catch-up by tag. | Returns notes for one or more tags using a server-assigned `seq` cursor. |
 | `StreamNotes` | Live updates for one tag. | Use it after a fetch cycle; current subscriptions do not initialize from the request cursor. |
-| `Stats` | Basic operational counts. | Returns aggregate note and tag counts. Per-tag statistics are defined in protobuf but not populated yet. |
 
 ## Transport model
 
