@@ -182,11 +182,22 @@ async fn verify_supported_schema(pool: &SqlitePool) -> Result<(), DatabaseError>
     let normalized_sql =
         table_sql.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
     let cursor_is_monotonic = normalized_sql.contains("SEQ INTEGER PRIMARY KEY AUTOINCREMENT");
+    let is_strict: bool = sqlx::query_scalar(
+        "SELECT strict = 1 FROM pragma_table_list WHERE schema = 'main' AND name = 'notes'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(query_error)?;
     let id_is_unique = has_exact_index(pool, "id", true).await?;
     let tag_cursor_index = has_exact_index(pool, "tag,seq", false).await?;
     let created_at_index = has_exact_index(pool, "created_at", false).await?;
 
-    if columns_match && cursor_is_monotonic && id_is_unique && tag_cursor_index && created_at_index
+    if columns_match
+        && cursor_is_monotonic
+        && is_strict
+        && id_is_unique
+        && tag_cursor_index
+        && created_at_index
     {
         Ok(())
     } else {
@@ -206,6 +217,7 @@ async fn has_exact_index(
         "SELECT EXISTS(\
          SELECT 1 FROM pragma_index_list('notes') AS indexes \
          WHERE (SELECT group_concat(name, ',') FROM pragma_index_info(indexes.name)) = ? \
+         AND indexes.partial = 0 \
          AND (? = 0 OR indexes.[unique] = 1))",
     )
     .bind(columns)
@@ -274,6 +286,7 @@ mod tests {
 
         let error = verify_supported_schema(&pool).await.unwrap_err();
         assert!(matches!(error, DatabaseError::Migration(_)));
+        pool.close().await;
     }
 
     #[tokio::test]
@@ -299,5 +312,62 @@ mod tests {
 
         let error = verify_supported_schema(&pool).await.unwrap_err();
         assert!(matches!(error, DatabaseError::Migration(_)));
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn rejects_partial_note_id_uniqueness() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE notes (\
+             seq INTEGER PRIMARY KEY AUTOINCREMENT, id BLOB NOT NULL, tag INTEGER NOT NULL, \
+             header BLOB NOT NULL, details BLOB NOT NULL, created_at INTEGER NOT NULL, \
+             after_block_num INTEGER) STRICT",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE UNIQUE INDEX idx_notes_id ON notes(id) WHERE 0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE INDEX idx_notes_tag_seq ON notes(tag, seq)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE INDEX idx_notes_created_at ON notes(created_at)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let error = verify_supported_schema(&pool).await.unwrap_err();
+        assert!(matches!(error, DatabaseError::Migration(_)));
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn rejects_non_strict_schema() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE notes (\
+             seq INTEGER PRIMARY KEY AUTOINCREMENT, id BLOB NOT NULL UNIQUE, \
+             tag INTEGER NOT NULL, header BLOB NOT NULL, details BLOB NOT NULL, \
+             created_at INTEGER NOT NULL, after_block_num INTEGER)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE INDEX idx_notes_tag_seq ON notes(tag, seq)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE INDEX idx_notes_created_at ON notes(created_at)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let error = verify_supported_schema(&pool).await.unwrap_err();
+        assert!(matches!(error, DatabaseError::Migration(_)));
+        pool.close().await;
     }
 }
