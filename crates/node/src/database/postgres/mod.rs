@@ -2,9 +2,10 @@ use chrono::{DateTime, Utc};
 use miden_protocol::note::NoteHeader;
 use miden_protocol::utils::serde::{Deserializable, Serializable};
 use sqlx::postgres::{PgPoolOptions, PgRow};
-use sqlx::{PgPool, Postgres, QueryBuilder, Row};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 
-use super::{DatabaseBackend, DatabaseError, StorageSnapshot, StoreResult, envelope_digest};
+use super::sqlite::SqliteDatabase;
+use super::{DatabaseBackend, DatabaseError, StorageMetadata, StoreResult, envelope_digest};
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteTag, StoredNote};
 
@@ -43,7 +44,16 @@ impl PostgresDatabase {
         MIGRATOR.run(&pool).await.map_err(migration_error)
     }
 
-    pub async fn import_all(&self, snapshot: &StorageSnapshot) -> Result<(), DatabaseError> {
+    pub async fn import_from_sqlite(
+        &self,
+        source: &SqliteDatabase,
+        expected: &StorageMetadata,
+    ) -> Result<u64, DatabaseError> {
+        if expected.row_count < 0 || expected.next_cursor < 1 || expected.retained_bytes < 0 {
+            return Err(DatabaseError::Migration(
+                "SQLite storage metadata contains a negative value".to_string(),
+            ));
+        }
         let mut tx = self.pool.begin().await.map_err(query_error)?;
         let metadata = sqlx::query(
             "SELECT next_cursor, retained_bytes FROM storage_metadata \
@@ -64,43 +74,42 @@ impl PostgresDatabase {
             ));
         }
 
+        let mut cursor = 0_i64;
+        let mut row_count = 0_i64;
         let mut retained_bytes = 0_i64;
-        let mut next_cursor = 1_i64;
-        for note in &snapshot.notes {
-            if note.header.to_bytes().len() + note.details.len() > super::FETCH_NOTES_MAX_BYTES {
-                return Err(DatabaseError::Migration(format!(
-                    "note at cursor {} exceeds the V1 envelope limit",
-                    note.seq
-                )));
+        let mut source_digest = copy_hasher();
+        loop {
+            let notes = source.export_batch(cursor).await?;
+            if notes.is_empty() {
+                break;
             }
-            let size = i64::try_from(note.header.to_bytes().len() + note.details.len())
-                .map_err(|_| DatabaseError::Serialization("note is too large".to_string()))?;
-            retained_bytes = retained_bytes.checked_add(size).ok_or_else(|| {
-                DatabaseError::Serialization("retained byte count overflow".to_string())
-            })?;
-            next_cursor = next_cursor.max(
-                note.seq
-                    .checked_add(1)
-                    .ok_or_else(|| DatabaseError::Serialization("cursor overflow".to_string()))?,
-            );
-            sqlx::query(
-                "INSERT INTO notes \
-                 (seq, envelope_digest, id, tag, header, details, created_at, after_block_num) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-            )
-            .bind(note.seq)
-            .bind(envelope_digest(note).as_slice())
-            .bind(note.header.id().as_bytes().as_slice())
-            .bind(i64::from(note.header.metadata().tag().as_u32()))
-            .bind(note.header.to_bytes())
-            .bind(&note.details)
-            .bind(note.created_at.timestamp_micros())
-            .bind(note.after_block_num.map(i64::from))
-            .execute(&mut *tx)
-            .await
-            .map_err(query_error)?;
+            for note in notes {
+                if note.seq <= cursor {
+                    return Err(DatabaseError::Migration(
+                        "SQLite cursors are not strictly increasing".to_string(),
+                    ));
+                }
+                let envelope_bytes = insert_copy_note(&mut tx, &note, &mut source_digest).await?;
+                retained_bytes = retained_bytes
+                    .checked_add(i64::try_from(envelope_bytes).map_err(|_| {
+                        DatabaseError::Serialization("note is too large".to_string())
+                    })?)
+                    .ok_or_else(|| {
+                        DatabaseError::Serialization("retained byte count overflow".to_string())
+                    })?;
+                row_count = row_count.checked_add(1).ok_or_else(|| {
+                    DatabaseError::Serialization("row count overflow".to_string())
+                })?;
+                cursor = note.seq;
+            }
         }
-        if retained_bytes != snapshot.retained_bytes || next_cursor > snapshot.next_cursor {
+        let minimum_next_cursor = cursor.checked_add(1).ok_or_else(|| {
+            DatabaseError::Serialization("cursor overflow during copy".to_string())
+        })?;
+        if row_count != expected.row_count
+            || retained_bytes != expected.retained_bytes
+            || minimum_next_cursor > expected.next_cursor
+        {
             return Err(DatabaseError::Migration(
                 "SQLite storage metadata does not match its notes".to_string(),
             ));
@@ -109,58 +118,113 @@ impl PostgresDatabase {
             "UPDATE storage_metadata SET next_cursor = $1, retained_bytes = $2 \
              WHERE singleton = TRUE",
         )
-        .bind(snapshot.next_cursor)
-        .bind(snapshot.retained_bytes)
+        .bind(expected.next_cursor)
+        .bind(expected.retained_bytes)
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
+        verify_copy(&mut tx, expected, source_digest.finalize()).await?;
         tx.commit().await.map_err(query_error)?;
         self.metrics
-            .record_retained_bytes(u64::try_from(snapshot.retained_bytes).unwrap_or(u64::MAX));
-        Ok(())
+            .record_retained_bytes(u64::try_from(expected.retained_bytes).unwrap_or(u64::MAX));
+        u64::try_from(row_count)
+            .map_err(|_| DatabaseError::Serialization("row count overflow".to_string()))
+    }
+}
+
+fn copy_hasher() -> blake3::Hasher {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"miden-note-transport-copy-v1");
+    hasher
+}
+
+fn hash_copy_entry(hasher: &mut blake3::Hasher, seq: i64, digest: &[u8]) {
+    hasher.update(&seq.to_le_bytes());
+    hasher.update(digest);
+}
+
+async fn insert_copy_note(
+    tx: &mut Transaction<'_, Postgres>,
+    note: &StoredNote,
+    copy_digest: &mut blake3::Hasher,
+) -> Result<usize, DatabaseError> {
+    let envelope_bytes = note.header.to_bytes().len() + note.details.len();
+    if envelope_bytes > super::FETCH_NOTES_MAX_BYTES {
+        return Err(DatabaseError::Migration(format!(
+            "note at cursor {} exceeds the V1 envelope limit",
+            note.seq
+        )));
+    }
+    let digest = envelope_digest(note);
+    hash_copy_entry(copy_digest, note.seq, &digest);
+    sqlx::query(
+        "INSERT INTO notes \
+         (seq, envelope_digest, id, tag, header, details, created_at, after_block_num) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(note.seq)
+    .bind(digest.as_slice())
+    .bind(note.header.id().as_bytes().as_slice())
+    .bind(i64::from(note.header.metadata().tag().as_u32()))
+    .bind(note.header.to_bytes())
+    .bind(&note.details)
+    .bind(note.created_at.timestamp_micros())
+    .bind(note.after_block_num.map(i64::from))
+    .execute(&mut **tx)
+    .await
+    .map_err(query_error)?;
+    Ok(envelope_bytes)
+}
+
+async fn verify_copy(
+    tx: &mut Transaction<'_, Postgres>,
+    expected: &StorageMetadata,
+    source_digest: blake3::Hash,
+) -> Result<(), DatabaseError> {
+    let totals = sqlx::query(
+        "SELECT COUNT(*) AS row_count, \
+         COALESCE(SUM(OCTET_LENGTH(header)::BIGINT + OCTET_LENGTH(details)::BIGINT), 0)::BIGINT \
+             AS retained_bytes \
+         FROM notes",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(query_error)?;
+    let actual_count: i64 = totals.try_get("row_count").map_err(query_error)?;
+    let actual_retained: i64 = totals.try_get("retained_bytes").map_err(query_error)?;
+    if actual_count != expected.row_count || actual_retained != expected.retained_bytes {
+        return Err(DatabaseError::Migration(
+            "PostgreSQL row count or retained bytes failed verification".to_string(),
+        ));
     }
 
-    pub async fn verify_import(&self, snapshot: &StorageSnapshot) -> Result<(), DatabaseError> {
-        let rows = sqlx::query("SELECT seq, envelope_digest FROM notes ORDER BY seq")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(query_error)?;
-        if rows.len() != snapshot.notes.len() {
-            return Err(DatabaseError::Migration(format!(
-                "import verification failed: expected {} rows, found {}",
-                snapshot.notes.len(),
-                rows.len()
-            )));
-        }
-        for (row, note) in rows.iter().zip(&snapshot.notes) {
-            let seq: i64 = row.try_get("seq").map_err(query_error)?;
-            let digest: Vec<u8> = row.try_get("envelope_digest").map_err(query_error)?;
-            if seq != note.seq || digest != envelope_digest(note) {
-                return Err(DatabaseError::Migration(format!(
-                    "import verification failed at cursor {}",
-                    note.seq
-                )));
-            }
-        }
-        let metadata = sqlx::query(
-            "SELECT next_cursor, retained_bytes FROM storage_metadata WHERE singleton = TRUE",
+    let mut cursor = 0_i64;
+    let mut destination_digest = copy_hasher();
+    loop {
+        let rows = sqlx::query(
+            "SELECT seq, envelope_digest FROM notes WHERE seq > $1 ORDER BY seq LIMIT $2",
         )
-        .fetch_one(&self.pool)
+        .bind(cursor)
+        .bind(i64::from(super::FETCH_NOTES_MAX_ROWS))
+        .fetch_all(&mut **tx)
         .await
         .map_err(query_error)?;
-        let actual_next_cursor: i64 = metadata.try_get("next_cursor").map_err(query_error)?;
-        let actual_retained: i64 = metadata.try_get("retained_bytes").map_err(query_error)?;
-        if actual_next_cursor != snapshot.next_cursor || actual_retained != snapshot.retained_bytes
-        {
-            return Err(DatabaseError::Migration(format!(
-                "import metadata mismatch: expected cursor {} and {} bytes, found cursor \
-                 {actual_next_cursor} and \
-                 {actual_retained} bytes",
-                snapshot.next_cursor, snapshot.retained_bytes
-            )));
+        if rows.is_empty() {
+            break;
         }
-        Ok(())
+        for row in rows {
+            let seq: i64 = row.try_get("seq").map_err(query_error)?;
+            let digest: Vec<u8> = row.try_get("envelope_digest").map_err(query_error)?;
+            hash_copy_entry(&mut destination_digest, seq, &digest);
+            cursor = seq;
+        }
     }
+    if source_digest != destination_digest.finalize() {
+        return Err(DatabaseError::Migration(
+            "PostgreSQL envelope digests failed verification".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -299,7 +363,8 @@ impl DatabaseBackend for PostgresDatabase {
             .await
             .map_err(query_error)?;
         let rows = sqlx::query(
-            "SELECT seq, OCTET_LENGTH(header) + OCTET_LENGTH(details) AS retained_bytes \
+            "SELECT seq, OCTET_LENGTH(header)::BIGINT + OCTET_LENGTH(details)::BIGINT \
+                 AS retained_bytes \
              FROM notes WHERE created_at < $1 ORDER BY seq LIMIT $2",
         )
         .bind(cutoff)

@@ -7,7 +7,7 @@ use miden_protocol::utils::serde::{Deserializable, Serializable};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
-use super::{DatabaseBackend, DatabaseError, StorageSnapshot, StoreResult, envelope_digest};
+use super::{DatabaseBackend, DatabaseError, StorageMetadata, StoreResult, envelope_digest};
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteTag, StoredNote};
 
@@ -52,27 +52,36 @@ impl SqliteDatabase {
         finalize_migration(&pool).await
     }
 
-    pub async fn export_all(&self) -> Result<StorageSnapshot, DatabaseError> {
-        let mut tx = self.pool.begin().await.map_err(query_error)?;
+    pub async fn copy_metadata(&self) -> Result<StorageMetadata, DatabaseError> {
+        let row = sqlx::query(
+            "SELECT (SELECT COUNT(*) FROM notes) AS row_count, next_cursor, retained_bytes \
+             FROM storage_metadata WHERE singleton = 1",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(query_error)?;
+        Ok(StorageMetadata {
+            row_count: row.try_get("row_count").map_err(query_error)?,
+            next_cursor: row.try_get("next_cursor").map_err(query_error)?,
+            retained_bytes: row.try_get("retained_bytes").map_err(query_error)?,
+        })
+    }
+
+    pub async fn export_batch(&self, cursor: i64) -> Result<Vec<StoredNote>, DatabaseError> {
         let rows = sqlx::query(
-            "SELECT seq, header, details, created_at, after_block_num FROM notes ORDER BY seq",
+            "SELECT seq, header, details, created_at, after_block_num FROM (\
+             SELECT seq, header, details, created_at, after_block_num, \
+             SUM(LENGTH(header) + LENGTH(details)) OVER (ORDER BY seq) AS running_bytes \
+             FROM notes WHERE seq > ? ORDER BY seq) \
+             WHERE running_bytes <= ? ORDER BY seq LIMIT ?",
         )
-        .fetch_all(&mut *tx)
+        .bind(cursor)
+        .bind(i64::try_from(super::FETCH_NOTES_MAX_BYTES).unwrap_or(i64::MAX))
+        .bind(i64::from(super::FETCH_NOTES_MAX_ROWS))
+        .fetch_all(&self.pool)
         .await
         .map_err(query_error)?;
-        let metadata = sqlx::query(
-            "SELECT next_cursor, retained_bytes FROM storage_metadata WHERE singleton = 1",
-        )
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(query_error)?;
-        let snapshot = StorageSnapshot {
-            notes: rows.iter().map(row_to_note).collect::<Result<_, _>>()?,
-            next_cursor: metadata.try_get("next_cursor").map_err(query_error)?,
-            retained_bytes: metadata.try_get("retained_bytes").map_err(query_error)?,
-        };
-        tx.commit().await.map_err(query_error)?;
-        Ok(snapshot)
+        rows.iter().map(row_to_note).collect()
     }
 }
 

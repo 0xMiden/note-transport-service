@@ -28,8 +28,8 @@ pub enum StoreResult {
     AlreadyPresent,
 }
 
-struct StorageSnapshot {
-    notes: Vec<StoredNote>,
+struct StorageMetadata {
+    row_count: i64,
     next_cursor: i64,
     retained_bytes: i64,
 }
@@ -126,12 +126,9 @@ impl Database {
             ));
         }
         let source = SqliteDatabase::connect(&sqlite.url, false, metrics.clone()).await?;
-        let snapshot = source.export_all().await?;
-        let count = snapshot.notes.len() as u64;
+        let metadata = source.copy_metadata().await?;
         let destination = PostgresDatabase::connect(&postgres.url, metrics).await?;
-        destination.import_all(&snapshot).await?;
-        destination.verify_import(&snapshot).await?;
-        Ok(count)
+        destination.import_from_sqlite(&source, &metadata).await
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -240,7 +237,7 @@ mod tests {
         Database::connect_for_test(Metrics::default().db).await.unwrap()
     }
 
-    async fn backend_contract(db: Database) {
+    async fn backend_contract(db: &Database) {
         let first = note(&[1]);
         assert_eq!(db.store_note(&first, u64::MAX).await.unwrap(), StoreResult::Inserted);
         assert_eq!(db.store_note(&first, 0).await.unwrap(), StoreResult::AlreadyPresent);
@@ -265,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_backend_contract() {
-        backend_contract(sqlite().await).await;
+        backend_contract(&sqlite().await).await;
     }
 
     #[tokio::test]
@@ -309,7 +306,12 @@ mod tests {
 
         drop(postgres);
         reset_postgres(&url).await;
-        backend_contract(Database::connect(config, Metrics::default().db).await.unwrap()).await;
+        let postgres = Database::connect(config, Metrics::default().db).await.unwrap();
+        backend_contract(&postgres).await;
+        let mut expired = note(&[4]);
+        expired.created_at = Utc::now() - chrono::Duration::days(2);
+        postgres.store_note(&expired, u64::MAX).await.unwrap();
+        assert_eq!(postgres.cleanup_old_notes(1, 1).await.unwrap(), 1);
     }
 
     async fn reset_postgres(url: &str) {
