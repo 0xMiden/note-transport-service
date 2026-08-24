@@ -36,15 +36,8 @@ tonic-web        = { workspace = true }
 tower            = { features = ["timeout"], workspace = true }
 tower-http       = { features = ["cors"], workspace = true }
 
-# Protobuf
-prost-types = { workspace = true }
-
 # Database
-deadpool          = { workspace = true }
-deadpool-diesel   = { features = ["sqlite"], version = "0.6" }
-deadpool-sync     = { workspace = true }
-diesel            = { features = ["numeric", "sqlite"], version = "2.3" }
-diesel_migrations = { features = ["sqlite"], version = "2.3" }
+sqlx = { workspace = true }
 
 # Logging
 opentelemetry         = { workspace = true }
@@ -66,6 +59,3 @@ chrono = { workspace = true }
 
 # General
 rand = { workspace = true }
-
-[dev-dependencies]
-serial_test = { workspace = true }

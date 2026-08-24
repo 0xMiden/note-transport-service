@@ -44,16 +44,3 @@ impl From<StoredNote> for TransportNote {
         }
     }
 }
-
-/// Helper converter from [`prost_types::Timestamp`] to `DateTime<Utc>`
-pub fn proto_timestamp_to_datetime(pts: prost_types::Timestamp) -> anyhow::Result<DateTime<Utc>> {
-    let dts = DateTime::from_timestamp(
-        pts.seconds,
-        pts.nanos
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Negative timestamp nanoseconds".to_string()))?,
-    )
-    .ok_or_else(|| anyhow::anyhow!("Invalid timestamp".to_string()))?;
-
-    Ok(dts)
-}

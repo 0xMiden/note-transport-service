@@ -1,149 +1,71 @@
-use chrono::Utc;
-use diesel::prelude::*;
+use std::str::FromStr;
 
-use crate::database::{DatabaseBackend, DatabaseConfig, DatabaseError};
+use chrono::{DateTime, Utc};
+use miden_protocol::note::NoteHeader;
+use miden_protocol::utils::serde::{Deserializable, Serializable};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
+
+use super::{DatabaseBackend, DatabaseError};
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteId, NoteTag, StoredNote};
 
-mod connection_manager;
-mod migrations;
-mod models;
-mod schema;
-
-use connection_manager::ConnectionManager;
-use models::{NewNote, Note};
-
-/// Maximum number of notes returned in a single `fetch_notes` / `fetch_notes_by_tags`
-/// response. Bounds memory on both the server (one DB buffer) and the client (one
-/// deserialized batch) regardless of how far behind the client's cursor is. A
-/// backlogged client paginates naturally by re-calling with the returned cursor.
 pub(crate) const FETCH_NOTES_BATCH_SIZE: i64 = 500;
-
-/// Threshold above which a `fetch_notes` cursor is interpreted as a legacy
-/// microsecond-timestamp cursor from the pre-`seq` schema and reset to 0.
-///
-/// Before the `seq`-cursor migration, cursors were `created_at.timestamp_micros()`
-/// — values near 1.7×10^15. After migration, cursors are `seq` values starting
-/// at 1. Without this reset, any client that stored a cursor before migration
-/// would see zero notes forever (until `seq` caught up to their old timestamp,
-/// which at realistic insert rates is decades). 10^12 is two orders of magnitude
-/// above any plausible `seq` value we'd reach in the lifetime of this deployment,
-/// and two orders of magnitude below any microsecond timestamp this decade.
 const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("src/database/sqlite/migrations");
 
-/// `SQLite` implementation of the database backend
 pub struct SqliteDatabase {
-    pool: deadpool_diesel::Pool<ConnectionManager, deadpool::managed::Object<ConnectionManager>>,
+    pool: SqlitePool,
     metrics: MetricsDatabase,
 }
 
 impl SqliteDatabase {
-    /// Execute a query within a transaction
-    async fn transact<R, Q, M>(&self, msg: M, query: Q) -> Result<R, DatabaseError>
-    where
-        Q: Send + FnOnce(&mut SqliteConnection) -> Result<R, DatabaseError> + 'static,
-        R: Send + 'static,
-        M: Send + ToString,
-    {
-        let conn = self
-            .pool
-            .get()
+    pub async fn connect(url: &str, metrics: MetricsDatabase) -> Result<Self, DatabaseError> {
+        let normalized = normalize_url(url);
+        let is_memory = normalized == "sqlite::memory:";
+        let options = SqliteConnectOptions::from_str(&normalized)
+            .map_err(|error| DatabaseError::Configuration(error.to_string()))?
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Full)
+            .busy_timeout(std::time::Duration::from_secs(30));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(if is_memory { 1 } else { 16 })
+            .connect_with(options)
             .await
-            .map_err(|e| DatabaseError::Connection(format!("Failed to get connection: {e}")))?;
-
-        conn.interact(|conn| conn.transaction(|conn| query(conn)))
-            .await
-            .map_err(|err| {
-                DatabaseError::QueryExecution(format!("Failed to {}: {}", msg.to_string(), err))
-            })?
-    }
-
-    /// Execute a query without a transaction
-    async fn query<R, Q, M>(&self, msg: M, query: Q) -> Result<R, DatabaseError>
-    where
-        Q: Send + FnOnce(&mut SqliteConnection) -> Result<R, DatabaseError> + 'static,
-        R: Send + 'static,
-        M: Send + ToString,
-    {
-        let conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| DatabaseError::Connection(format!("Failed to get connection: {e}")))?;
-
-        conn.interact(move |conn| query(conn)).await.map_err(|err| {
-            DatabaseError::QueryExecution(format!("Failed to {}: {}", msg.to_string(), err))
-        })?
+            .map_err(connection_error)?;
+        MIGRATOR.run(&pool).await.map_err(migration_error)?;
+        Ok(Self { pool, metrics })
     }
 }
 
 #[async_trait::async_trait]
 impl DatabaseBackend for SqliteDatabase {
-    async fn connect(
-        config: DatabaseConfig,
-        metrics: MetricsDatabase,
-    ) -> Result<Self, DatabaseError> {
-        if !std::path::Path::new(&config.url).exists() && !config.url.contains(":memory:") {
-            std::fs::File::create(&config.url).map_err(|e| {
-                DatabaseError::Configuration(format!("Failed to create database file: {e}"))
-            })?;
-        }
-
-        // SQLite `:memory:` DBs are per-connection-isolated — two connections
-        // pointing at `:memory:` see two different databases. With a pool of N
-        // connections, writes splinter across N isolated DBs and most reads
-        // return a partial view, which silently loses note data under load.
-        //
-        // Two ways to fix for an in-memory DB:
-        //   1. `file::memory:?cache=shared` — SQLite URI syntax that makes all connections share
-        //      the SAME in-memory DB via shared cache.
-        //   2. Pool with `max_size=1` so only one connection exists.
-        //
-        // We pick #2 for simplicity and portability (URI mode requires the
-        // `SQLITE_OPEN_URI` flag to be set on connection open, which is not the
-        // driver default). For file-backed URLs, a large pool is appropriate
-        // since all connections open the same file.
-        let is_in_memory = config.url == ":memory:" || config.url.starts_with("file::memory:");
-        let max_size = if is_in_memory { 1 } else { 16 };
-
-        let manager = ConnectionManager::new(&config.url);
-        let pool = deadpool_diesel::Pool::builder(manager)
-            .max_size(max_size)
-            .build()
-            .map_err(|e| DatabaseError::Pool(format!("Failed to create connection pool: {e}")))?;
-
-        Ok(Self { pool, metrics })
-    }
-
     #[tracing::instrument(skip(self, note), fields(operation = "db.store_note"))]
     async fn store_note(&self, note: &StoredNote) -> Result<(), DatabaseError> {
-        tracing::debug!(note_id = %note.header.id(), tag = note.header.metadata().tag().as_u32(), "db store_note");
-
         let timer = self.metrics.db_store_note();
-
-        let new_note = NewNote::from(note);
-        self.transact("store note", move |conn| {
-            diesel::insert_into(schema::notes::table).values(&new_note).execute(conn)?;
-            Ok(())
-        })
-        .await?;
-
+        sqlx::query(
+            "INSERT INTO notes (id, tag, header, details, created_at, after_block_num) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(note.header.id().as_bytes().as_slice())
+        .bind(i64::from(note.header.metadata().tag().as_u32()))
+        .bind(note.header.to_bytes())
+        .bind(&note.details)
+        .bind(note.created_at.timestamp_micros())
+        .bind(note.after_block_num.map(i64::from))
+        .execute(&self.pool)
+        .await
+        .map_err(query_error)?;
         timer.finish("ok");
         Ok(())
-    }
-
-    async fn fetch_notes(
-        &self,
-        tag: NoteTag,
-        cursor: u64,
-    ) -> Result<Vec<StoredNote>, DatabaseError> {
-        self.fetch_notes_by_tags(&[tag], cursor).await
     }
 
     #[tracing::instrument(skip(self, tags), fields(
         operation = "db.fetch_notes_by_tags",
         tag_count = tags.len(),
-        cursor = cursor,
+        cursor,
         notes_returned = tracing::field::Empty,
     ))]
     async fn fetch_notes_by_tags(
@@ -152,11 +74,11 @@ impl DatabaseBackend for SqliteDatabase {
         cursor: u64,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
         let timer = self.metrics.db_fetch_notes();
+        if tags.is_empty() {
+            timer.finish("ok");
+            return Ok(Vec::new());
+        }
 
-        // Legacy cursor detection: clients upgraded from the pre-`seq` schema
-        // carry microsecond-timestamp cursors; interpret those as 0 so they
-        // don't stall forever waiting for `seq` to catch up. Record a metric
-        // so operators can see when pre-migration clients are being reset.
         let effective_cursor = if cursor > LEGACY_CURSOR_THRESHOLD {
             self.metrics.db_fetch_notes_legacy_cursor_reset();
             tracing::info!(original_cursor = cursor, "Legacy cursor reset to 0");
@@ -164,81 +86,97 @@ impl DatabaseBackend for SqliteDatabase {
         } else {
             cursor
         };
-
-        let cursor_i64: i64 = effective_cursor.try_into().map_err(|_| {
-            DatabaseError::QueryExecution("Cursor too large for SQLite".to_string())
+        let cursor = i64::try_from(effective_cursor).map_err(|_| {
+            DatabaseError::QueryExecution("cursor exceeds SQLite range".to_string())
         })?;
 
-        if tags.is_empty() {
-            timer.finish("ok");
-            return Ok(Vec::new());
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT seq, header, details, created_at, after_block_num \
+             FROM notes WHERE seq > ",
+        );
+        query.push_bind(cursor).push(" AND tag IN (");
+        let mut separated = query.separated(", ");
+        for tag in tags {
+            separated.push_bind(i64::from(tag.as_u32()));
         }
+        separated.push_unseparated(") ORDER BY seq LIMIT ");
+        query.push_bind(FETCH_NOTES_BATCH_SIZE);
 
-        let tag_values: Vec<i64> = tags.iter().map(|t| i64::from(t.as_u32())).collect();
-
-        // Single query for all tags runs in ONE DB snapshot, so a concurrent
-        // INSERT can't land between per-tag queries and get leapfrogged by the
-        // cursor advance. This closes the second half of the pagination race
-        // (the monotonic `seq` column closed the timestamp-collision half).
-        //
-        // LIMIT caps response size; a backlogged client paginates by re-calling
-        // with the returned cursor until the response is smaller than the limit.
-        let notes: Vec<Note> = self
-            .transact("fetch notes by tags", move |conn| {
-                use schema::notes::dsl::{notes, seq, tag};
-                let fetched_notes = notes
-                    .filter(tag.eq_any(&tag_values))
-                    .filter(seq.gt(cursor_i64))
-                    .order(seq.asc())
-                    .limit(FETCH_NOTES_BATCH_SIZE)
-                    // Name-based column selection (via `Selectable`) so a future
-                    // mid-table column insert can't silently misalign fields.
-                    .select(Note::as_select())
-                    .load(conn)?;
-                Ok(fetched_notes)
-            })
-            .await?;
-
-        let mut stored_notes = Vec::new();
-        for note in notes {
-            let stored_note = StoredNote::try_from(note).map_err(|e| {
-                DatabaseError::Deserialization(format!("Failed to deserialize note: {e}"))
-            })?;
-            stored_notes.push(stored_note);
-        }
-
-        tracing::Span::current().record("notes_returned", stored_notes.len());
+        let rows = query.build().fetch_all(&self.pool).await.map_err(query_error)?;
+        let notes: Result<Vec<_>, _> = rows.iter().map(row_to_note).collect();
+        let notes = notes?;
+        tracing::Span::current().record("notes_returned", notes.len());
         timer.finish("ok");
-
-        Ok(stored_notes)
+        Ok(notes)
     }
 
     async fn cleanup_old_notes(&self, retention_days: u32) -> Result<u64, DatabaseError> {
-        let cutoff_date = Utc::now() - chrono::Duration::days(i64::from(retention_days));
-        let cutoff_timestamp = cutoff_date.timestamp_micros();
-
-        let deleted_count: i64 = self
-            .transact("cleanup old notes", move |conn| {
-                use schema::notes::dsl::{created_at, notes};
-                let count =
-                    diesel::delete(notes.filter(created_at.lt(cutoff_timestamp))).execute(conn)?;
-                Ok(i64::try_from(count).unwrap_or(0))
-            })
-            .await?;
-
-        Ok(deleted_count.try_into().unwrap_or(0))
+        let cutoff =
+            (Utc::now() - chrono::Duration::days(i64::from(retention_days))).timestamp_micros();
+        let result = sqlx::query("DELETE FROM notes WHERE created_at < ?")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await
+            .map_err(query_error)?;
+        Ok(result.rows_affected())
     }
 
     async fn note_exists(&self, note_id: NoteId) -> Result<bool, DatabaseError> {
-        let count: i64 = self
-            .query("check note existence", move |conn| {
-                use schema::notes::dsl::{id, notes};
-                let count =
-                    notes.filter(id.eq(&note_id.as_bytes()[..])).count().get_result(conn)?;
-                Ok(count)
-            })
-            .await?;
-
-        Ok(count > 0)
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?)")
+            .bind(note_id.as_bytes().as_slice())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(query_error)
     }
+}
+
+fn normalize_url(url: &str) -> String {
+    if url == ":memory:" {
+        "sqlite::memory:".to_string()
+    } else if url.starts_with("sqlite:") {
+        url.to_string()
+    } else {
+        format!("sqlite://{url}")
+    }
+}
+
+fn row_to_note(row: &SqliteRow) -> Result<StoredNote, DatabaseError> {
+    let header_bytes: Vec<u8> = row.try_get("header").map_err(query_error)?;
+    let header = NoteHeader::read_from_bytes(&header_bytes)
+        .map_err(|error| DatabaseError::Deserialization(error.to_string()))?;
+    let timestamp: i64 = row.try_get("created_at").map_err(query_error)?;
+    let created_at = DateTime::from_timestamp_micros(timestamp)
+        .ok_or_else(|| DatabaseError::Deserialization(format!("invalid timestamp: {timestamp}")))?;
+    let after_block_num: Option<i64> = row.try_get("after_block_num").map_err(query_error)?;
+    Ok(StoredNote {
+        header,
+        details: row.try_get("details").map_err(query_error)?,
+        created_at,
+        seq: row.try_get("seq").map_err(query_error)?,
+        after_block_num: after_block_num
+            .map(|value| {
+                u32::try_from(value).map_err(|_| {
+                    DatabaseError::Deserialization(format!("invalid block number: {value}"))
+                })
+            })
+            .transpose()?,
+    })
+}
+
+fn connection_error(error: sqlx::Error) -> DatabaseError {
+    let message = error.to_string();
+    drop(error);
+    DatabaseError::Connection(message)
+}
+
+fn query_error(error: sqlx::Error) -> DatabaseError {
+    let message = error.to_string();
+    drop(error);
+    DatabaseError::QueryExecution(message)
+}
+
+fn migration_error(error: sqlx::migrate::MigrateError) -> DatabaseError {
+    let message = error.to_string();
+    drop(error);
+    DatabaseError::Migration(message)
 }
