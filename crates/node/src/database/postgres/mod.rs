@@ -549,7 +549,9 @@ fn migration_error(error: sqlx::migrate::MigrateError) -> DatabaseError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::str::FromStr;
+
+    use sqlx::postgres::PgConnectOptions;
 
     use super::*;
 
@@ -559,15 +561,19 @@ mod tests {
             return;
         };
         let pool = PgPoolOptions::new().max_connections(2).connect(&url).await.unwrap();
-        let pids_before = listener_pids(&pool).await;
-        let mut listener = PgListener::connect(&url).await.unwrap();
+        let application_name = format!("mnt-listener-test-{}", std::process::id());
+        let options = PgConnectOptions::from_str(&url).unwrap().application_name(&application_name);
+        let listener_pool =
+            PgPoolOptions::new().max_connections(1).connect_with(options).await.unwrap();
+        let mut listener = PgListener::connect_with(&listener_pool).await.unwrap();
         listener.listen(CHANGE_CHANNEL).await.unwrap();
         listener.eager_reconnect(false);
-        let pids_after = listener_pids(&pool).await;
-        let pid = *pids_after
-            .difference(&pids_before)
-            .next()
-            .expect("listener PID was not visible");
+        let pid: i32 =
+            sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE application_name = $1")
+                .bind(&application_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
 
         let (changes, mut receiver) = watch::channel(DatabaseWatch::ready());
         let task = spawn_listener(url, listener, changes);
@@ -590,18 +596,5 @@ mod tests {
             .unwrap();
         assert!(receiver.borrow_and_update().is_ready());
         task.abort();
-    }
-
-    async fn listener_pids(pool: &PgPool) -> BTreeSet<i32> {
-        sqlx::query_scalar(
-            "SELECT pid FROM pg_stat_activity \
-             WHERE datname = current_database() \
-             AND query = 'LISTEN \"miden_note_transport_changes\"'",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap()
-        .into_iter()
-        .collect()
     }
 }

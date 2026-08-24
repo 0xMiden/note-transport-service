@@ -528,4 +528,50 @@ mod tests {
         assert_eq!(update.notes[0].details, stored[1].details);
         assert_eq!(update.cursor, u64::try_from(stored[1].seq).unwrap());
     }
+
+    #[tokio::test]
+    async fn stream_drains_more_than_one_page_in_order() {
+        let (server, database) = test_server_with_database().await;
+        let mut expected = Vec::new();
+        for value in 0..=crate::database::FETCH_NOTES_MAX_ROWS {
+            let details = value.to_le_bytes().to_vec();
+            database
+                .store_note(
+                    &StoredNote {
+                        header: test_note_header(),
+                        details: details.clone(),
+                        created_at: Utc::now(),
+                        seq: 0,
+                        after_block_num: None,
+                    },
+                    u64::MAX,
+                )
+                .await
+                .unwrap();
+            expected.push(details);
+        }
+
+        let response = server
+            .stream_notes(tonic::Request::new(StreamNotesRequest { tag: TAG_LOCAL_ANY, cursor: 0 }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first.notes.len(), crate::database::FETCH_NOTES_MAX_ROWS as usize);
+        assert_eq!(second.notes.len(), 1);
+        assert!(first.cursor < second.cursor);
+        let actual: Vec<_> =
+            first.notes.into_iter().chain(second.notes).map(|note| note.details).collect();
+        assert_eq!(actual, expected);
+    }
 }
