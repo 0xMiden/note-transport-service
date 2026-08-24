@@ -6,9 +6,11 @@ The Miden Note Transport service stores private note envelopes for a configured 
 
 The workspace contains the node library and its protobuf runtime and build crates. The `miden-note-transport-node` binary runs the server.
 
+Production deployments use PostgreSQL. SQLite remains supported for local use and for the offline move to PostgreSQL. The [operator guide](docs/external/src/operators.md) covers deployment and database operations.
+
 ## API reference
 
-`SendNote` stores an envelope for its recipient. `FetchNotes` returns stored envelopes for a tag, while `StreamNotes` sends new envelopes as they arrive.
+`SendNote` stores an envelope for its recipient. Recipients use `FetchNotes` for paged reads and `StreamNotes` for live updates.
 
 ### Telemetry
 

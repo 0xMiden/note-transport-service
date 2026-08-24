@@ -108,7 +108,7 @@ miden-note-transport-node serve \
 
 ## Docker Compose
 
-The repository includes a Docker Compose setup for the node with persistent SQLite storage:
+The repository includes a Docker Compose setup for local PostgreSQL storage:
 
 ```bash
 make docker-node-up
@@ -122,7 +122,7 @@ make docker-node-down
 
 to stop the stack.
 
-Compose runs the migration command before it starts the node. Both services mount `/app/data` on the `node_data` volume. Compose forwards either supported OTLP endpoint variable from the host environment or `.env` file.
+Compose waits for PostgreSQL, runs the migration command, and starts the node as an unprivileged user. PostgreSQL data remains in the `postgres_data` volume. Compose forwards either supported OTLP endpoint variable from the host environment or `.env` file.
 
 ## Ports
 

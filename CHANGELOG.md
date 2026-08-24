@@ -31,6 +31,19 @@ Skip the changelog only when the PR contains no runtime-affecting changes
 (docs, CI, tooling, tests). In that case the hook will tell you to apply the
 `no changelog` label instead.
 
+## v0.5.0-rc.2 (unreleased)
+
+### Features
+
+- Added PostgreSQL storage and a verified command for copying a stopped SQLite database ([#114](https://github.com/0xMiden/note-transport-service/issues/114)).
+- Added bounded storage, explicit cleanup, dependency readiness, graceful shutdown, and service metrics ([#114](https://github.com/0xMiden/note-transport-service/issues/114)).
+
+### Changes
+
+- [BREAKING] Changed the protobuf package to `miden_note_transport.v1` and removed the `Stats` RPC ([#114](https://github.com/0xMiden/note-transport-service/issues/114)).
+- Changed `StreamNotes` to use committed database notifications instead of periodic polling ([#114](https://github.com/0xMiden/note-transport-service/issues/114)).
+- Replaced Diesel with SQLx and removed the bundled telemetry deployment and obsolete book source ([#114](https://github.com/0xMiden/note-transport-service/issues/114)).
+
 ## v0.5.0-rc.1 (2026-08-18)
 
 ### Features

@@ -2,8 +2,7 @@
 FROM rust:1.96-slim-bookworm AS builder
 
 RUN apt-get update && \
-    apt-get -y upgrade && \
-    apt-get install -y llvm clang bindgen pkg-config libsqlite3-dev ca-certificates && \
+    apt-get install -y --no-install-recommends pkg-config ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -17,20 +16,19 @@ RUN cargo install --path bin/node --locked
 
 FROM debian:bookworm-slim
 
-# Update machine & install required packages
-# The installation of libsqlite3-0 is needed because the binary is linked against it
 RUN apt-get update && \
-    apt-get -y upgrade && \
     apt-get install -y --no-install-recommends \
-    libsqlite3-0 \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system mnt && useradd --system --gid mnt --no-create-home mnt
 
 COPY --from=builder /usr/local/cargo/bin/miden-note-transport-node /usr/local/bin/miden-note-transport-node
 
 LABEL org.opencontainers.image.authors=devops@miden.team \
     org.opencontainers.image.url=https://0xMiden.github.io/ \
-    org.opencontainers.image.documentation=https://github.com/0xMiden/miden-note-transport \
-    org.opencontainers.image.source=https://github.com/0xMiden/miden-note-transport \
+    org.opencontainers.image.documentation=https://github.com/0xMiden/note-transport-service \
+    org.opencontainers.image.source=https://github.com/0xMiden/note-transport-service \
     org.opencontainers.image.vendor=Miden \
     org.opencontainers.image.licenses=MIT
 
@@ -41,7 +39,8 @@ LABEL org.opencontainers.image.created=$CREATED \
     org.opencontainers.image.version=$VERSION \
     org.opencontainers.image.revision=$COMMIT
 
-# Expose port
 EXPOSE 57292
 
-CMD ["miden-note-transport-node", "--host", "0.0.0.0"]
+USER mnt
+ENTRYPOINT ["miden-note-transport-node"]
+CMD ["serve", "--host", "0.0.0.0"]
