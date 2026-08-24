@@ -1,11 +1,22 @@
 services:
+  migrate:
+    build:
+      context: .
+      dockerfile: bin/node/docker/Dockerfile
+    command: ["miden-note-transport-node", "migrate", "--database-url", "/app/data/node.db"]
+    volumes:
+      - node_data:/app/data
+
   miden-note-transport-node:
     build:
       context: .
       dockerfile: bin/node/docker/Dockerfile
     ports:
       - "57292:57292"  # gRPC
-    command: ["miden-note-transport-node", "--host", "0.0.0.0", "--database-url", "/app/data/node.db"]
+    command: ["miden-note-transport-node", "serve", "--host", "0.0.0.0", "--database-url", "/app/data/node.db", "--max-storage-bytes", "1073741824"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     environment:
       - JSON_LOGGING=true
       - OTEL_EXPORTER_OTLP_ENDPOINT

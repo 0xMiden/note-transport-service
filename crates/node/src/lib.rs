@@ -15,9 +15,7 @@
 //! Notes are stored through [`Database`](`crate::database::Database`). The storage contract is
 //! private to this crate, and SQLite provides the current implementation.
 //!
-//! ### Maintenance
-//! A periodic task [`DatabaseMaintenance`](`crate::database::DatabaseMaintenance`) takes care of
-//! maintaining the database (cleaning up older notes).
+//! Schema migration and retention cleanup are explicit operator commands.
 //!
 //! ## Telemetry
 //! Metrics and traces to monitor the node state are provided.

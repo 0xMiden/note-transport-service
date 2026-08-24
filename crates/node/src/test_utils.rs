@@ -10,7 +10,7 @@ use miden_protocol::note::{
 };
 use miden_protocol::testing::account_id::ACCOUNT_ID_MAX_ZEROES;
 use miden_protocol::{Felt, Word};
-use rand::Rng;
+use rand::RngExt;
 
 /// Generate a random [`NoteDetailsCommitment`]
 pub fn random_note_details_commitment() -> NoteDetailsCommitment {

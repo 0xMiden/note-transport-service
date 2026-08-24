@@ -1,5 +1,5 @@
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 
 /// Transport metrics using OpenTelemetry metrics
 ///
@@ -37,11 +37,7 @@ pub struct MetricsDatabase {
     // fetch_notes()
     fetch_notes_count: Counter<u64>,
     fetch_notes_duration: Histogram<f64>,
-    // legacy cursor reset (pre-seq-migration clients)
-    fetch_notes_legacy_cursor_reset_count: Counter<u64>,
-    // Maintenance
-    maintenance_cleanup_notes_count: Counter<u64>,
-    maintenance_cleanup_notes_duration: Histogram<f64>,
+    retained_bytes: Gauge<u64>,
 }
 
 impl Metrics {
@@ -169,24 +165,10 @@ impl MetricsDatabase {
             .with_unit("s")
             .build();
 
-        let fetch_notes_legacy_cursor_reset_count = meter
-            .u64_counter("db_fetch_notes_legacy_cursor_reset_count")
-            .with_description(
-                "Number of fetch_notes() requests where the client's cursor was \
-                 above the legacy-cursor threshold and reset to 0 (pre-seq-migration \
-                 clients)",
-            )
-            .build();
-
-        let maintenance_cleanup_notes_count = meter
-            .u64_counter("db_maintenance_cleanup_notes_count")
-            .with_description("Total number of DB maintenance cleanup_old_notes() requests")
-            .build();
-
-        let maintenance_cleanup_notes_duration = meter
-            .f64_histogram("db_maintenance_cleanup_notes_duration")
-            .with_description("Duration of DB maintenance cleanup_old_notes() requests in seconds")
-            .with_unit("s")
+        let retained_bytes = meter
+            .u64_gauge("db_retained_bytes")
+            .with_description("Current retained note header and detail bytes")
+            .with_unit("B")
             .build();
 
         Self {
@@ -194,9 +176,7 @@ impl MetricsDatabase {
             store_note_duration,
             fetch_notes_count,
             fetch_notes_duration,
-            fetch_notes_legacy_cursor_reset_count,
-            maintenance_cleanup_notes_count,
-            maintenance_cleanup_notes_duration,
+            retained_bytes,
         }
     }
 
@@ -222,20 +202,9 @@ impl MetricsDatabase {
         request_count_measure(operation, counter, histogram)
     }
 
-    /// Record a legacy-cursor reset (pre-seq-migration client).
-    pub fn db_fetch_notes_legacy_cursor_reset(&self) {
-        self.fetch_notes_legacy_cursor_reset_count.add(1, &[]);
-    }
-
-    /// Measure a DB maintenance cleanup-old-notes procedure
-    ///
-    /// Increases the request counter and measures request duration.
-    pub fn db_maintenance_cleanup_notes(&self) -> RequestTimer<'_> {
-        let operation = "db.maintenance.cleanup_old_notes";
-        let counter = &self.maintenance_cleanup_notes_count;
-        let histogram = &self.maintenance_cleanup_notes_duration;
-
-        request_count_measure(operation, counter, histogram)
+    /// Record the retained payload byte count.
+    pub fn record_retained_bytes(&self, bytes: u64) {
+        self.retained_bytes.record(bytes, &[]);
     }
 }
 

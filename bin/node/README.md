@@ -13,7 +13,7 @@ The binary will be available on `./target/release/miden-note-transport-node`.
 
 ## Docker setup
 
-The Docker Compose setup runs the node with persistent SQLite storage. Set an OTLP endpoint when the node should export telemetry to an external collector.
+The Docker Compose setup migrates a persistent SQLite database before it starts the node. Set an OTLP endpoint when the node should export telemetry to an external collector.
 
 ## License
 This project is [MIT licensed](../../LICENSE).
