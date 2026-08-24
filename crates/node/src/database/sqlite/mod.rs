@@ -35,6 +35,7 @@ impl SqliteDatabase {
             .connect_with(options)
             .await
             .map_err(connection_error)?;
+        verify_supported_schema(&pool).await?;
         MIGRATOR.run(&pool).await.map_err(migration_error)?;
         Ok(Self { pool, metrics })
     }
@@ -140,6 +141,37 @@ fn normalize_url(url: &str) -> String {
     }
 }
 
+async fn verify_supported_schema(pool: &SqlitePool) -> Result<(), DatabaseError> {
+    let has_notes: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notes')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(query_error)?;
+    if !has_notes {
+        return Ok(());
+    }
+
+    let columns = sqlx::query("PRAGMA table_info(notes)")
+        .fetch_all(pool)
+        .await
+        .map_err(query_error)?;
+    let has_column = |name: &str| {
+        columns
+            .iter()
+            .any(|row| row.try_get::<String, _>("name").is_ok_and(|column| column == name))
+    };
+    let required = ["seq", "id", "tag", "header", "details", "created_at", "after_block_num"];
+    if required.into_iter().all(has_column) {
+        Ok(())
+    } else {
+        Err(DatabaseError::Migration(
+            "unsupported legacy SQLite schema; upgrade it with the previous release first"
+                .to_string(),
+        ))
+    }
+}
+
 fn row_to_note(row: &SqliteRow) -> Result<StoredNote, DatabaseError> {
     let header_bytes: Vec<u8> = row.try_get("header").map_err(query_error)?;
     let header = NoteHeader::read_from_bytes(&header_bytes)
@@ -179,4 +211,25 @@ fn migration_error(error: sqlx::migrate::MigrateError) -> DatabaseError {
     let message = error.to_string();
     drop(error);
     DatabaseError::Migration(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_unsupported_legacy_schema_before_serving() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE notes (\
+             id BLOB PRIMARY KEY, tag INTEGER NOT NULL, header BLOB NOT NULL, \
+             details BLOB NOT NULL, created_at INTEGER NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = verify_supported_schema(&pool).await.unwrap_err();
+        assert!(matches!(error, DatabaseError::Migration(_)));
+    }
 }
