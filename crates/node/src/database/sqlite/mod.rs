@@ -274,6 +274,10 @@ impl DatabaseBackend for SqliteDatabase {
     fn subscribe(&self) -> tokio::sync::watch::Receiver<DatabaseWatch> {
         self.changes.subscribe()
     }
+
+    async fn is_ready(&self) -> bool {
+        sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(&self.pool).await.is_ok()
+    }
 }
 
 async fn open_pool(

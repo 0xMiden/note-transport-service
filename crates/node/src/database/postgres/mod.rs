@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use chrono::{DateTime, Utc};
 use miden_protocol::note::NoteHeader;
 use miden_protocol::utils::serde::{Deserializable, Serializable};
@@ -23,6 +26,7 @@ const CHANGE_CHANNEL: &str = "miden_note_transport_changes";
 pub struct PostgresDatabase {
     pool: PgPool,
     changes: watch::Sender<DatabaseWatch>,
+    listener_ready: Arc<AtomicBool>,
     listener: tokio::task::JoinHandle<()>,
     metrics: MetricsDatabase,
 }
@@ -47,8 +51,16 @@ impl PostgresDatabase {
         pg_listener.listen(CHANGE_CHANNEL).await.map_err(connection_error)?;
         pg_listener.eager_reconnect(false);
         let (changes, _) = watch::channel(DatabaseWatch::ready());
-        let listener = spawn_listener(url.to_string(), pg_listener, changes.clone());
-        Ok(Self { pool, changes, listener, metrics })
+        let listener_ready = Arc::new(AtomicBool::new(true));
+        let listener =
+            spawn_listener(url.to_string(), pg_listener, changes.clone(), listener_ready.clone());
+        Ok(Self {
+            pool,
+            changes,
+            listener_ready,
+            listener,
+            metrics,
+        })
     }
 
     pub async fn migrate(url: &str) -> Result<(), DatabaseError> {
@@ -428,18 +440,25 @@ impl DatabaseBackend for PostgresDatabase {
     fn subscribe(&self) -> watch::Receiver<DatabaseWatch> {
         self.changes.subscribe()
     }
+
+    async fn is_ready(&self) -> bool {
+        self.listener_ready.load(Ordering::Acquire)
+            && sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&self.pool).await.is_ok()
+    }
 }
 
 fn spawn_listener(
     url: String,
     mut listener: PgListener,
     changes: watch::Sender<DatabaseWatch>,
+    ready: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match listener.try_recv().await {
                 Ok(Some(_)) => changes.send_modify(DatabaseWatch::advance),
                 result => {
+                    ready.store(false, Ordering::Release);
                     changes.send_modify(|state| {
                         state.ready = false;
                         state.advance();
@@ -461,6 +480,7 @@ fn spawn_listener(
                                 Ok(()) => {
                                     replacement.eager_reconnect(false);
                                     listener = replacement;
+                                    ready.store(true, Ordering::Release);
                                     changes.send_modify(|state| {
                                         state.ready = true;
                                         state.advance();
@@ -576,7 +596,8 @@ mod tests {
                 .unwrap();
 
         let (changes, mut receiver) = watch::channel(DatabaseWatch::ready());
-        let task = spawn_listener(url, listener, changes);
+        let ready = Arc::new(AtomicBool::new(true));
+        let task = spawn_listener(url, listener, changes, ready.clone());
         let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
             .bind(pid)
             .fetch_one(&pool)
@@ -589,12 +610,14 @@ mod tests {
             .expect("listener loss was not reported")
             .unwrap();
         assert!(!receiver.borrow_and_update().is_ready());
+        assert!(!ready.load(Ordering::Acquire));
 
         tokio::time::timeout(std::time::Duration::from_secs(3), receiver.changed())
             .await
             .expect("listener did not reconnect")
             .unwrap();
         assert!(receiver.borrow_and_update().is_ready());
+        assert!(ready.load(Ordering::Acquire));
         task.abort();
     }
 }

@@ -76,6 +76,10 @@ struct ServeArgs {
     #[arg(long, default_value = "4")]
     request_timeout: usize,
 
+    /// Maximum number of live `StreamNotes` requests.
+    #[arg(long, default_value = "1024")]
+    max_streams: usize,
+
     /// Maximum bytes retained for note headers and encrypted details.
     #[arg(long, env = "MNT_MAX_STORAGE_BYTES")]
     max_storage_bytes: u64,
@@ -85,7 +89,7 @@ struct ServeArgs {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let tracing_config = TracingConfig::from_otel_env();
-    setup_tracing(tracing_config)?;
+    let _tracing_guard = setup_tracing(tracing_config)?;
 
     match cli.command {
         Command::Migrate(args) => {
@@ -111,12 +115,6 @@ async fn main() -> Result<()> {
             info!(copied, "SQLite notes copied and verified");
         },
         Command::Serve(args) => {
-            if args.max_note_size > miden_note_transport_node::database::FETCH_NOTES_MAX_BYTES {
-                return Err(miden_note_transport_node::Error::Internal(format!(
-                    "max note size cannot exceed {} bytes",
-                    miden_note_transport_node::database::FETCH_NOTES_MAX_BYTES
-                )));
-            }
             let config = NodeConfig {
                 grpc: GrpcServerConfig {
                     host: args.host,
@@ -125,10 +123,11 @@ async fn main() -> Result<()> {
                     max_connections: args.max_connections,
                     request_timeout: args.request_timeout,
                     max_storage_bytes: args.max_storage_bytes,
+                    max_streams: args.max_streams,
                 },
                 database: DatabaseConfig::new(args.database.database_url),
             };
-            Node::init(config).await?.entrypoint().await;
+            Node::init(config).await?.entrypoint().await?;
         },
     }
 

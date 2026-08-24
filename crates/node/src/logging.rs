@@ -32,6 +32,23 @@ pub enum OpenTelemetry {
     Disabled,
 }
 
+/// Keeps telemetry providers alive and flushes them during process shutdown.
+pub struct TracingGuard {
+    tracer_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    meter_provider: Option<SdkMeterProvider>,
+}
+
+impl Drop for TracingGuard {
+    fn drop(&mut self) {
+        if let Some(provider) = self.tracer_provider.take() {
+            let _ = provider.shutdown();
+        }
+        if let Some(provider) = self.meter_provider.take() {
+            let _ = provider.shutdown();
+        }
+    }
+}
+
 impl TracingConfig {
     /// Build tracing configuration from the environment.
     ///
@@ -73,30 +90,27 @@ impl OpenTelemetry {
 ///
 /// The open-telemetry configuration is controlled via environment variables as defined in the
 /// [specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/protocol/exporter.md#opentelemetry-protocol-exporter)
-pub fn setup_tracing(cfg: TracingConfig) -> Result<()> {
-    if cfg.otel.is_enabled() {
+pub fn setup_tracing(cfg: TracingConfig) -> Result<TracingGuard> {
+    let meter_provider = if cfg.otel.is_enabled() {
         opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
-
-        // Setup metrics export if OTEL is enabled
-        setup_metrics_export(&cfg.otel)?;
-    }
+        setup_metrics_export(&cfg.otel)?
+    } else {
+        None
+    };
 
     // Note: open-telemetry requires a tokio-runtime, so this _must_ be lazily evaluated (aka not
     // `then_some`) to avoid crashing sync callers (with OpenTelemetry::Disabled set). Examples of
     // such callers are tests with logging enabled.
-    let otel_layer = {
+    let (otel_layer, tracer_provider) = {
         if let OpenTelemetry::Enabled { endpoint } = cfg.otel {
             let exporter_builder =
                 opentelemetry_otlp::SpanExporter::builder().with_tonic().with_endpoint(endpoint);
-
-            match exporter_builder.build() {
-                Ok(exporter) => {
-                    Some(open_telemetry_layer(exporter, "miden-note-transport-node".to_string()))
-                },
-                Err(_) => None,
-            }
+            let exporter = exporter_builder.build()?;
+            let (layer, provider) =
+                open_telemetry_layer(exporter, "miden-note-transport-node".to_string());
+            (Some(layer), Some(provider))
         } else {
-            None
+            (None, None)
         }
     };
 
@@ -104,11 +118,12 @@ pub fn setup_tracing(cfg: TracingConfig) -> Result<()> {
         .with(stdout_layer(cfg.json_format).with_filter(env_or_default_filter()))
         .with(otel_layer.with_filter(env_or_default_filter()));
 
-    tracing::subscriber::set_global_default(subscriber).map_err(Into::into)
+    tracing::subscriber::set_global_default(subscriber)?;
+    Ok(TracingGuard { tracer_provider, meter_provider })
 }
 
 /// Setup OpenTelemetry metrics export using the proper SDK API
-fn setup_metrics_export(otel_cfg: &OpenTelemetry) -> Result<()> {
+fn setup_metrics_export(otel_cfg: &OpenTelemetry) -> Result<Option<SdkMeterProvider>> {
     if let OpenTelemetry::Enabled { endpoint } = otel_cfg {
         // Configure OTLP metrics pipeline
         let exporter = opentelemetry_otlp::MetricExporter::builder()
@@ -125,10 +140,11 @@ fn setup_metrics_export(otel_cfg: &OpenTelemetry) -> Result<()> {
             .build();
 
         // Set the meter provider globally
-        opentelemetry::global::set_meter_provider(provider);
+        opentelemetry::global::set_meter_provider(provider.clone());
+        return Ok(Some(provider));
     }
 
-    Ok(())
+    Ok(None)
 }
 
 /// Initializes tracing to a test exporter.
@@ -147,7 +163,7 @@ pub fn setup_test_tracing() -> Result<(
     let (exporter, rx_export, rx_shutdown) =
         opentelemetry_sdk::testing::trace::new_tokio_test_exporter();
 
-    let otel_layer = open_telemetry_layer(exporter, "test-service".to_string());
+    let (otel_layer, _provider) = open_telemetry_layer(exporter, "test-service".to_string());
     let subscriber = Registry::default()
         .with(stdout_layer(true).with_filter(env_or_default_filter()))
         .with(otel_layer.with_filter(env_or_default_filter()));
@@ -158,7 +174,10 @@ pub fn setup_test_tracing() -> Result<(
 fn open_telemetry_layer<S>(
     exporter: impl SpanExporter + 'static,
     service_name: String,
-) -> Box<dyn tracing_subscriber::Layer<S> + Send + Sync + 'static>
+) -> (
+    Box<dyn tracing_subscriber::Layer<S> + Send + Sync + 'static>,
+    opentelemetry_sdk::trace::SdkTracerProvider,
+)
 where
     S: Subscriber + Sync + Send,
     for<'a> S: tracing_subscriber::registry::LookupSpan<'a>,
@@ -170,9 +189,9 @@ where
     let tracer = provider.tracer(service_name);
 
     // Set the tracer provider globally
-    opentelemetry::global::set_tracer_provider(provider);
+    opentelemetry::global::set_tracer_provider(provider.clone());
 
-    OpenTelemetryLayer::new(tracer).boxed()
+    (OpenTelemetryLayer::new(tracer).boxed(), provider)
 }
 
 fn stdout_layer<S>(

@@ -78,6 +78,8 @@ trait DatabaseBackend: Send + Sync {
     ) -> Result<u64, DatabaseError>;
 
     fn subscribe(&self) -> tokio::sync::watch::Receiver<DatabaseWatch>;
+
+    async fn is_ready(&self) -> bool;
 }
 
 /// Database connection configuration.
@@ -208,6 +210,11 @@ impl Database {
     /// Subscribe to committed storage changes.
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<DatabaseWatch> {
         self.backend.subscribe()
+    }
+
+    /// Check whether storage can serve requests and deliver commit signals.
+    pub async fn is_ready(&self) -> bool {
+        self.backend.is_ready().await
     }
 }
 
