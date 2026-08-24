@@ -52,6 +52,9 @@ impl Node {
         if config.grpc.max_streams == 0 {
             return Err(crate::Error::Internal("max streams must be nonzero".to_string()));
         }
+        if config.grpc.request_timeout == 0 {
+            return Err(crate::Error::Internal("request timeout must be nonzero".to_string()));
+        }
         let metrics = Metrics::default();
         let database =
             Arc::new(Database::connect(config.database.clone(), metrics.db.clone()).await?);

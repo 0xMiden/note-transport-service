@@ -37,6 +37,7 @@ use crate::metrics::MetricsGrpc;
 /// A realistic wallet tracks O(10) to O(100) tags; 128 is generous without
 /// being an attack surface.
 const MAX_TAGS_PER_FETCH_REQUEST: usize = 128;
+const READINESS_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Miden Note Transport gRPC server
 pub struct GrpcServer {
@@ -105,7 +106,7 @@ impl GrpcServer {
         health_reporter
             .set_service_status("", tonic_health::ServingStatus::Serving)
             .await;
-        set_api_health(&health_reporter, self.database.is_ready().await).await;
+        set_api_health(&health_reporter, database_is_ready(&self.database).await).await;
 
         let database = self.database.clone();
         let mut readiness_shutdown = self.shutdown.subscribe();
@@ -119,7 +120,7 @@ impl GrpcServer {
                         }
                     },
                     () = tokio::time::sleep(Duration::from_secs(1)) => {
-                        set_api_health(&readiness_reporter, database.is_ready().await).await;
+                        set_api_health(&readiness_reporter, database_is_ready(&database).await).await;
                     },
                 }
             }
@@ -138,12 +139,14 @@ impl GrpcServer {
             .map_err(|e| crate::Error::Internal(format!("Invalid address: {e}")))?;
 
         let cors = CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any);
-        let max_connections = u32::try_from(self.config.max_connections)
-            .expect("Node::init validates the HTTP/2 stream limit");
+        let max_connections = u32::try_from(self.config.max_connections).map_err(|_| {
+            crate::Error::Internal("max connections exceeds the HTTP/2 stream limit".to_string())
+        })?;
         let request_timeout = self.config.request_timeout;
         let shutdown = self.shutdown.clone();
+        let mut drain_shutdown = self.shutdown.subscribe();
 
-        tonic::transport::Server::builder()
+        let server = tonic::transport::Server::builder()
             .accept_http1(true)
             .max_concurrent_streams(Some(max_connections))
             .http2_keepalive_interval(Some(Duration::from_secs(30)))
@@ -155,10 +158,32 @@ impl GrpcServer {
             .add_service(health_svc)
             .add_service(reflection_svc)
             .add_service(self.into_service())
-            .serve_with_shutdown(addr, shutdown_signal(shutdown))
-            .await
-            .map_err(|e| crate::Error::Internal(format!("Server error: {e}")))
+            .serve_with_shutdown(addr, shutdown_signal(shutdown));
+        let drain_deadline = async move {
+            while !*drain_shutdown.borrow() {
+                if drain_shutdown.changed().await.is_err() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(request_timeout.saturating_add(1) as u64)).await;
+        };
+
+        tokio::select! {
+            result = server => {
+                result.map_err(|e| crate::Error::Internal(format!("Server error: {e}")))
+            },
+            () = drain_deadline => {
+                tracing::warn!("graceful shutdown deadline reached; closing remaining connections");
+                Ok(())
+            },
+        }
     }
+}
+
+async fn database_is_ready(database: &Database) -> bool {
+    tokio::time::timeout(READINESS_TIMEOUT, database.is_ready())
+        .await
+        .unwrap_or(false)
 }
 
 async fn set_api_health(reporter: &tonic_health::server::HealthReporter, ready: bool) {
@@ -396,9 +421,12 @@ async fn stream_notes(
         }
         if !changes.borrow().is_ready() {
             metrics.error("stream_notes", tonic::Code::Unavailable);
-            let _ = tx
-                .send(Err(Status::unavailable("note storage change notifications are unavailable")))
-                .await;
+            send_stream_error(
+                &tx,
+                &mut shutdown,
+                Status::unavailable("note storage change notifications are unavailable"),
+            )
+            .await;
             return;
         }
         let fetched = tokio::select! {
@@ -412,7 +440,8 @@ async fn stream_notes(
             Ok(notes) if !notes.is_empty() => {
                 let Ok(next_cursor) = crate::database::advance_cursor(&notes, cursor) else {
                     metrics.error("stream_notes", tonic::Code::Internal);
-                    let _ = tx.send(Err(Status::internal("invalid note cursor"))).await;
+                    send_stream_error(&tx, &mut shutdown, Status::internal("invalid note cursor"))
+                        .await;
                     return;
                 };
                 cursor = next_cursor;
@@ -437,7 +466,7 @@ async fn stream_notes(
             Ok(_) => {},
             Err(error) => {
                 metrics.error("stream_notes", tonic::Code::Unavailable);
-                let _ = tx.send(Err(Status::unavailable(error.to_string()))).await;
+                send_stream_error(&tx, &mut shutdown, Status::unavailable(error.to_string())).await;
                 return;
             },
         }
@@ -455,6 +484,20 @@ async fn stream_notes(
                 return;
             },
         }
+    }
+}
+
+async fn send_stream_error(
+    tx: &mpsc::Sender<
+        Result<miden_note_transport_proto::miden_note_transport::v1::StreamNotesUpdate, Status>,
+    >,
+    shutdown: &mut watch::Receiver<bool>,
+    status: Status,
+) {
+    tokio::select! {
+        _ = tx.send(Err(status)) => {},
+        _ = shutdown.changed() => {},
+        () = tx.closed() => {},
     }
 }
 
@@ -671,6 +714,29 @@ mod tests {
             .await
             .expect("stream did not end after shutdown");
         assert!(ended.is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_a_blocked_stream_error() {
+        let (tx, _rx) = mpsc::channel(1);
+        tx.send(Ok(miden_note_transport_proto::miden_note_transport::v1::StreamNotesUpdate {
+            notes: Vec::new(),
+            cursor: 0,
+        }))
+        .await
+        .unwrap();
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let blocked = tokio::spawn(async move {
+            send_stream_error(&tx, &mut shutdown_rx, Status::unavailable("storage unavailable"))
+                .await;
+        });
+
+        shutdown_tx.send_replace(true);
+
+        tokio::time::timeout(Duration::from_secs(1), blocked)
+            .await
+            .expect("blocked error delivery ignored shutdown")
+            .unwrap();
     }
 
     #[tokio::test]

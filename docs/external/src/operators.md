@@ -134,7 +134,7 @@ The gRPC server exposes the note transport API and the health service on port `5
 
 The empty gRPC health service name reports process liveness. The `miden_note_transport.v1.MidenNoteTransport` service reports readiness. Readiness requires a working database query and, for PostgreSQL, a working change-notification listener.
 
-On SIGTERM or Ctrl-C, the server stops accepting new requests and closes active streams. Bounded unary requests may finish before the configured request timeout. Startup and serving failures produce a nonzero exit status. Telemetry providers flush during normal shutdown.
+On SIGTERM or Ctrl-C, the server stops accepting new requests and closes active note streams. Bounded unary requests may finish before the configured request timeout. The process closes any remaining health, reflection, or application connection one second after that timeout. Startup and serving failures produce a nonzero exit status. Telemetry providers flush during normal shutdown.
 
 ## Database behavior
 
