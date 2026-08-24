@@ -1,61 +1,29 @@
 # Miden Note Transport Layer
 
-<!--`TODO(template) update badges`-->
-[![LICENSE](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/0xMiden/project-template/blob/main/LICENSE)
-[![test](https://github.com/0xMiden/project-template/actions/workflows/test.yml/badge.svg)](https://github.com/0xMiden/project-template/actions/workflows/test.yml)
-[![RUST_VERSION](https://img.shields.io/badge/rustc-1.89+-lightgray.svg)](https://www.rust-lang.org/tools/install)
-
 ## Overview
 
-The Miden Note Transport service is a communications system focusing on performance and privacy for the secure exchange of private notes.
+The Miden Note Transport service stores private note envelopes until a recipient fetches them. It supports asynchronous note exchange between Miden clients.
 
-The system is based mostly on a request-reply client-server communication scheme, supporting end-to-end encryption.
-The (optionally encrypted) notes are stored on-server allowing for async note exchange between users.
+The workspace contains the node library and its protobuf runtime and build crates. The `miden-note-transport-node` binary runs the server.
 
-### Crates
+## API reference
 
-This repository contains the following crates:
-
-- `node`: Node/server library;
-- `proto`: Protobuf definitions and generated code;
-
-### Binaries
-
-This repository contains the following binaries, built upon the above crates:
-
-- `node`: Node/server implementation, wrapping the respective library;
-- `cli`: Client command-line-interface, wrapping the respective (Rust) library. Easy-to-use application able to send and fetch notes from the Transport Layer;
-- `load-test`: Load testing tool for the node implementation.
-
-## API Reference
-
-Three main functions are used to interact with the Transport Layer:
-
-- `send_note(note, address)` allows a client to push a note, directed to a recipient (identified by its address), to the Transport Layer. The note is kept in the Transport Layer for a certain retention period (30 days);
-- `fetch_notes(tag)` allows a client to fetch notes associated with a certain tag;
-- `stream_notes(tag)` similarly to `fetch_notes()`, but the client subscribes to a tag and receives new notes periodically.
+`SendNote` stores an envelope for its recipient. `FetchNotes` returns stored envelopes for a tag, while `StreamNotes` sends new envelopes as they arrive.
 
 ### Telemetry
 
-Metrics and Traces are provided for the node implementation.
-Data is exported using OpenTelemetry.
-A Docker-based setup is provided, with the following stack:
-- OpenTelemetry Collector;
-- Tempo (Traces);
-- Prometheus (Metrics);
-- Grafana (Visualization).
+The node exports traces and metrics through OpenTelemetry when an OTLP endpoint is set. Operators provide the collector and telemetry storage used by their deployment. This repository does not bundle a telemetry stack.
 
 ## Contributing
 
-At minimum, please see our [contributing](https://github.com/0xMiden/.github/blob/main/CONTRIBUTING.md) guidelines and our [makefile](Makefile) for example workflows
-e.g. run the testsuite using
+Please read the organization [contributing guidelines](https://github.com/0xMiden/.github/blob/main/CONTRIBUTING.md). The [Makefile](Makefile) provides the local checks. Run the test suite with:
 
 ```sh
 make test
 ```
 
-Note that we do _not_ accept low-effort contributions or AI generated code. For typos and documentation errors please
-rather open an issue.
+We do not accept low effort contributions or generated code that the author has not reviewed. Please open an issue for small documentation errors.
 
 ## License
+
 This project is [MIT licensed](./LICENSE).
