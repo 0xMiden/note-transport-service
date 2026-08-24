@@ -7,7 +7,14 @@ use miden_protocol::utils::serde::{Deserializable, Serializable};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
-use super::{DatabaseBackend, DatabaseError, StorageMetadata, StoreResult, envelope_digest};
+use super::{
+    DatabaseBackend,
+    DatabaseError,
+    DatabaseWatch,
+    StorageMetadata,
+    StoreResult,
+    envelope_digest,
+};
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteTag, StoredNote};
 
@@ -15,6 +22,7 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("src/database/sqlite/m
 
 pub struct SqliteDatabase {
     pool: SqlitePool,
+    changes: tokio::sync::watch::Sender<DatabaseWatch>,
     metrics: MetricsDatabase,
 }
 
@@ -32,7 +40,8 @@ impl SqliteDatabase {
                 .await
                 .map_err(query_error)?;
         metrics.record_retained_bytes(u64::try_from(retained).unwrap_or(0));
-        Ok(Self { pool, metrics })
+        let (changes, _) = tokio::sync::watch::channel(DatabaseWatch::ready());
+        Ok(Self { pool, changes, metrics })
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -43,7 +52,8 @@ impl SqliteDatabase {
         let pool = open_pool(url, true, true).await?;
         MIGRATOR.run(&pool).await.map_err(migration_error)?;
         finalize_migration(&pool).await?;
-        Ok(Self { pool, metrics })
+        let (changes, _) = tokio::sync::watch::channel(DatabaseWatch::ready());
+        Ok(Self { pool, changes, metrics })
     }
 
     pub async fn migrate(url: &str, allow_in_memory: bool) -> Result<(), DatabaseError> {
@@ -165,6 +175,7 @@ impl DatabaseBackend for SqliteDatabase {
         .map_err(query_error)?;
 
         tx.commit().await.map_err(query_error)?;
+        self.changes.send_modify(DatabaseWatch::advance);
         self.metrics
             .record_retained_bytes(u64::try_from(next_retained).unwrap_or(u64::MAX));
         timer.finish("ok");
@@ -258,6 +269,10 @@ impl DatabaseBackend for SqliteDatabase {
         tx.commit().await.map_err(query_error)?;
         self.metrics.record_retained_bytes(u64::try_from(retained).unwrap_or(0));
         Ok(seqs.len() as u64)
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<DatabaseWatch> {
+        self.changes.subscribe()
     }
 }
 

@@ -1,5 +1,3 @@
-mod streaming;
-
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,7 +16,6 @@ use miden_note_transport_proto::miden_note_transport::v1::{
 };
 use miden_protocol::crypto::ies::SealedMessage;
 use miden_protocol::utils::serde::Deserializable;
-use rand::RngExt;
 use tokio::sync::mpsc;
 use tonic::Status;
 use tonic_web::GrpcWebLayer;
@@ -26,7 +23,6 @@ use tower::limit::GlobalConcurrencyLimitLayer;
 use tower::timeout::TimeoutLayer;
 use tower_http::cors::{Any, CorsLayer};
 
-use self::streaming::{NoteStreamer, StreamerMessage, Sub, Subface};
 use crate::database::{Database, normalize_fetch_cursor};
 use crate::metrics::MetricsGrpc;
 
@@ -46,7 +42,6 @@ const MAX_TAGS_PER_FETCH_REQUEST: usize = 128;
 pub struct GrpcServer {
     database: Arc<Database>,
     config: GrpcServerConfig,
-    streamer: StreamerCtx,
     metrics: MetricsGrpc,
 }
 
@@ -67,12 +62,6 @@ pub struct GrpcServerConfig {
     pub max_storage_bytes: u64,
 }
 
-/// Streaming task interface context
-pub(super) struct StreamerCtx {
-    tx: mpsc::Sender<StreamerMessage>,
-    handle: tokio::task::JoinHandle<()>,
-}
-
 impl Default for GrpcServerConfig {
     fn default() -> Self {
         Self {
@@ -89,8 +78,7 @@ impl Default for GrpcServerConfig {
 impl GrpcServer {
     /// gRPC server constructor
     pub fn new(database: Arc<Database>, config: GrpcServerConfig, metrics: MetricsGrpc) -> Self {
-        let streamer = StreamerCtx::spawn(database.clone());
-        Self { database, config, streamer, metrics }
+        Self { database, config, metrics }
     }
 
     /// Convert into a service
@@ -129,17 +117,6 @@ impl GrpcServer {
             .serve(addr)
             .await
             .map_err(|e| crate::Error::Internal(format!("Server error: {e}")))
-    }
-}
-
-impl StreamerCtx {
-    /// Spawn a [`NoteStreamer`] task
-    ///
-    /// Returns related context composed of the handle and `mpsc::Sender` `tx` for control messages.
-    pub(super) fn spawn(database: Arc<Database>) -> Self {
-        let (tx, rx) = mpsc::channel(128);
-        let handle = tokio::spawn(NoteStreamer::new(database, rx).stream());
-        Self { tx, handle }
     }
 }
 
@@ -297,7 +274,9 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         Ok(tonic::Response::new(FetchNotesResponse { notes: proto_notes, cursor: rcursor }))
     }
 
-    type StreamNotesStream = Sub;
+    type StreamNotesStream = tonic::codegen::tokio_stream::wrappers::ReceiverStream<
+        Result<miden_note_transport_proto::miden_note_transport::v1::StreamNotesUpdate, Status>,
+    >;
     #[tracing::instrument(skip(self, request), fields(
         operation = "grpc.stream_notes.request",
         subscription_id = tracing::field::Empty,
@@ -308,29 +287,66 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
     ) -> Result<tonic::Response<Self::StreamNotesStream>, tonic::Status> {
         let request_data = request.into_inner();
         let tag = request_data.tag.into();
-        let id: u64 = rand::rng().random();
+        let cursor = normalize_fetch_cursor(request_data.cursor);
+        let database = self.database.clone();
+        let changes = database.subscribe();
+        let (tx, rx) = mpsc::channel(1);
+        tokio::spawn(stream_notes(database, tag, cursor, changes, tx));
 
-        let span = tracing::Span::current();
-        span.record("subscription_id", id);
-
-        tracing::debug!(tag = crate::types::NoteTag::as_u32(&tag), cursor = request_data.cursor, "stream_notes subscribe");
-
-        let (sub_tx, sub_rx) = mpsc::channel(32);
-        let sub = Sub::new(id, tag, sub_rx, self.streamer.tx.clone());
-        let subf = Subface::new(id, tag, sub_tx);
-        self.streamer.tx.try_send(StreamerMessage::AddSub(subf))
-                    .map_err(|e| tonic::Status::internal(format!("Failed sending internal streamer message: {e}")))?;
-
-        Ok(tonic::Response::new(sub))
+        Ok(tonic::Response::new(
+            tonic::codegen::tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
     }
-
 }
 
-impl Drop for StreamerCtx {
-    fn drop(&mut self) {
-        if let Err(e) = self.tx.try_send(StreamerMessage::Shutdown) {
-            tracing::error!("Streamer shutdown message sending failure: {e}");
-            self.handle.abort();
+async fn stream_notes(
+    database: Arc<Database>,
+    tag: crate::types::NoteTag,
+    mut cursor: u64,
+    mut changes: tokio::sync::watch::Receiver<crate::database::DatabaseWatch>,
+    tx: mpsc::Sender<
+        Result<miden_note_transport_proto::miden_note_transport::v1::StreamNotesUpdate, Status>,
+    >,
+) {
+    loop {
+        if !changes.borrow().is_ready() {
+            let _ = tx
+                .send(Err(Status::unavailable("note storage change notifications are unavailable")))
+                .await;
+            return;
+        }
+        match database.fetch_notes(tag, cursor).await {
+            Ok(notes) if !notes.is_empty() => {
+                let Ok(next_cursor) = crate::database::advance_cursor(&notes, cursor) else {
+                    let _ = tx.send(Err(Status::internal("invalid note cursor"))).await;
+                    return;
+                };
+                cursor = next_cursor;
+                let update =
+                    miden_note_transport_proto::miden_note_transport::v1::StreamNotesUpdate {
+                        notes: notes.into_iter().map(TransportNote::from).collect(),
+                        cursor,
+                    };
+                if tx.send(Ok(update)).await.is_err() {
+                    return;
+                }
+                continue;
+            },
+            Ok(_) => {},
+            Err(error) => {
+                let _ = tx.send(Err(Status::unavailable(error.to_string()))).await;
+                return;
+            },
+        }
+
+        tokio::select! {
+            result = changes.changed() => {
+                if result.is_err() {
+                    return;
+                }
+                changes.borrow_and_update();
+            },
+            () = tx.closed() => return,
         }
     }
 }
@@ -339,8 +355,12 @@ impl Drop for StreamerCtx {
 mod tests {
     use std::sync::Arc;
 
-    use miden_note_transport_proto::miden_note_transport::v1::FetchNotesRequest;
     use miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_server::MidenNoteTransport;
+    use miden_note_transport_proto::miden_note_transport::v1::{
+        FetchNotesRequest,
+        StreamNotesRequest,
+    };
+    use tonic::codegen::tokio_stream::StreamExt;
 
     use super::*;
     use crate::database::Database;
@@ -435,5 +455,77 @@ mod tests {
             .into_inner();
         assert_eq!(second.notes.len(), 1);
         assert!(second.cursor > first.cursor);
+    }
+
+    #[tokio::test]
+    async fn stream_waits_for_a_post_commit_notification() {
+        let (server, database) = test_server_with_database().await;
+        let response = server
+            .stream_notes(tonic::Request::new(StreamNotesRequest { tag: TAG_LOCAL_ANY, cursor: 0 }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), stream.next()).await.is_err(),
+            "an idle stream must wait instead of producing empty pages",
+        );
+
+        database
+            .store_note(
+                &StoredNote {
+                    header: test_note_header(),
+                    details: vec![1, 2, 3],
+                    created_at: Utc::now(),
+                    seq: 0,
+                    after_block_num: None,
+                },
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let update = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.notes.len(), 1);
+        assert!(update.cursor > 0);
+    }
+
+    #[tokio::test]
+    async fn stream_resumes_after_the_requested_cursor() {
+        let (server, database) = test_server_with_database().await;
+        for details in [vec![1], vec![2]] {
+            database
+                .store_note(
+                    &StoredNote {
+                        header: test_note_header(),
+                        details,
+                        created_at: Utc::now(),
+                        seq: 0,
+                        after_block_num: None,
+                    },
+                    u64::MAX,
+                )
+                .await
+                .unwrap();
+        }
+        let stored = database.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        let cursor = u64::try_from(stored[0].seq).unwrap();
+        let response = server
+            .stream_notes(tonic::Request::new(StreamNotesRequest { tag: TAG_LOCAL_ANY, cursor }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        let update = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.notes.len(), 1);
+        assert_eq!(update.notes[0].details, stored[1].details);
+        assert_eq!(update.cursor, u64::try_from(stored[1].seq).unwrap());
     }
 }

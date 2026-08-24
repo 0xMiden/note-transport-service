@@ -28,6 +28,27 @@ pub enum StoreResult {
     AlreadyPresent,
 }
 
+/// Storage change state observed by streaming readers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DatabaseWatch {
+    generation: u64,
+    ready: bool,
+}
+
+impl DatabaseWatch {
+    const fn ready() -> Self {
+        Self { generation: 0, ready: true }
+    }
+
+    fn advance(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    pub(crate) const fn is_ready(self) -> bool {
+        self.ready
+    }
+}
+
 struct StorageMetadata {
     row_count: i64,
     next_cursor: i64,
@@ -55,6 +76,8 @@ trait DatabaseBackend: Send + Sync {
         retention_days: u32,
         max_rows: u32,
     ) -> Result<u64, DatabaseError>;
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<DatabaseWatch>;
 }
 
 /// Database connection configuration.
@@ -181,6 +204,11 @@ impl Database {
     ) -> Result<u64, DatabaseError> {
         self.backend.cleanup_old_notes(retention_days, max_rows).await
     }
+
+    /// Subscribe to committed storage changes.
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<DatabaseWatch> {
+        self.backend.subscribe()
+    }
 }
 
 pub(crate) fn envelope_digest(note: &StoredNote) -> [u8; 32] {
@@ -203,6 +231,14 @@ pub(crate) fn envelope_digest(note: &StoredNote) -> [u8; 32] {
         },
     }
     *hasher.finalize().as_bytes()
+}
+
+pub(crate) fn advance_cursor(notes: &[StoredNote], cursor: u64) -> Result<u64, DatabaseError> {
+    notes.iter().try_fold(cursor, |cursor, note| {
+        let seq = u64::try_from(note.seq)
+            .map_err(|_| DatabaseError::Deserialization("negative note cursor".to_string()))?;
+        Ok(cursor.max(seq))
+    })
 }
 
 #[cfg(test)]

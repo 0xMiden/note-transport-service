@@ -1,18 +1,29 @@
 use chrono::{DateTime, Utc};
 use miden_protocol::note::NoteHeader;
 use miden_protocol::utils::serde::{Deserializable, Serializable};
-use sqlx::postgres::{PgPoolOptions, PgRow};
+use sqlx::postgres::{PgListener, PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
+use tokio::sync::watch;
 
 use super::sqlite::SqliteDatabase;
-use super::{DatabaseBackend, DatabaseError, StorageMetadata, StoreResult, envelope_digest};
+use super::{
+    DatabaseBackend,
+    DatabaseError,
+    DatabaseWatch,
+    StorageMetadata,
+    StoreResult,
+    envelope_digest,
+};
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteTag, StoredNote};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("src/database/postgres/migrations");
+const CHANGE_CHANNEL: &str = "miden_note_transport_changes";
 
 pub struct PostgresDatabase {
     pool: PgPool,
+    changes: watch::Sender<DatabaseWatch>,
+    listener: tokio::task::JoinHandle<()>,
     metrics: MetricsDatabase,
 }
 
@@ -32,7 +43,12 @@ impl PostgresDatabase {
         .map_err(query_error)?;
         metrics.record_retained_bytes(u64::try_from(retained).unwrap_or(0));
 
-        Ok(Self { pool, metrics })
+        let mut pg_listener = PgListener::connect(url).await.map_err(connection_error)?;
+        pg_listener.listen(CHANGE_CHANNEL).await.map_err(connection_error)?;
+        pg_listener.eager_reconnect(false);
+        let (changes, _) = watch::channel(DatabaseWatch::ready());
+        let listener = spawn_listener(url.to_string(), pg_listener, changes.clone());
+        Ok(Self { pool, changes, listener, metrics })
     }
 
     pub async fn migrate(url: &str) -> Result<(), DatabaseError> {
@@ -129,6 +145,12 @@ impl PostgresDatabase {
             .record_retained_bytes(u64::try_from(expected.retained_bytes).unwrap_or(u64::MAX));
         u64::try_from(row_count)
             .map_err(|_| DatabaseError::Serialization("row count overflow".to_string()))
+    }
+}
+
+impl Drop for PostgresDatabase {
+    fn drop(&mut self) {
+        self.listener.abort();
     }
 }
 
@@ -302,6 +324,11 @@ impl DatabaseBackend for PostgresDatabase {
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
+        sqlx::query("SELECT pg_notify($1, '')")
+            .bind(CHANGE_CHANNEL)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
         tx.commit().await.map_err(query_error)?;
         self.metrics
             .record_retained_bytes(u64::try_from(next_retained).unwrap_or(u64::MAX));
@@ -397,6 +424,60 @@ impl DatabaseBackend for PostgresDatabase {
         self.metrics.record_retained_bytes(u64::try_from(retained).unwrap_or(0));
         Ok(seqs.len() as u64)
     }
+
+    fn subscribe(&self) -> watch::Receiver<DatabaseWatch> {
+        self.changes.subscribe()
+    }
+}
+
+fn spawn_listener(
+    url: String,
+    mut listener: PgListener,
+    changes: watch::Sender<DatabaseWatch>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match listener.try_recv().await {
+                Ok(Some(_)) => changes.send_modify(DatabaseWatch::advance),
+                result => {
+                    changes.send_modify(|state| {
+                        state.ready = false;
+                        state.advance();
+                    });
+                    match result {
+                        Ok(None) => {
+                            tracing::error!("PostgreSQL note notification listener disconnected");
+                        },
+                        Err(error) => tracing::error!(
+                            %error,
+                            "PostgreSQL note notification listener failed"
+                        ),
+                        Ok(Some(_)) => unreachable!(),
+                    }
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        match PgListener::connect(&url).await {
+                            Ok(mut replacement) => match replacement.listen(CHANGE_CHANNEL).await {
+                                Ok(()) => {
+                                    replacement.eager_reconnect(false);
+                                    listener = replacement;
+                                    changes.send_modify(|state| {
+                                        state.ready = true;
+                                        state.advance();
+                                    });
+                                    break;
+                                },
+                                Err(error) => tracing::warn!(%error, "PostgreSQL LISTEN failed"),
+                            },
+                            Err(error) => {
+                                tracing::warn!(%error, "PostgreSQL listener reconnect failed");
+                            },
+                        }
+                    }
+                },
+            }
+        }
+    })
 }
 
 async fn verify_schema(pool: &PgPool) -> Result<(), DatabaseError> {
@@ -464,4 +545,63 @@ fn migration_error(error: sqlx::migrate::MigrateError) -> DatabaseError {
     let message = error.to_string();
     drop(error);
     DatabaseError::Migration(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn listener_loss_is_reported_before_reconnection() {
+        let Ok(url) = std::env::var("MNT_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let pool = PgPoolOptions::new().max_connections(2).connect(&url).await.unwrap();
+        let pids_before = listener_pids(&pool).await;
+        let mut listener = PgListener::connect(&url).await.unwrap();
+        listener.listen(CHANGE_CHANNEL).await.unwrap();
+        listener.eager_reconnect(false);
+        let pids_after = listener_pids(&pool).await;
+        let pid = *pids_after
+            .difference(&pids_before)
+            .next()
+            .expect("listener PID was not visible");
+
+        let (changes, mut receiver) = watch::channel(DatabaseWatch::ready());
+        let task = spawn_listener(url, listener, changes);
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(pid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(terminated);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), receiver.changed())
+            .await
+            .expect("listener loss was not reported")
+            .unwrap();
+        assert!(!receiver.borrow_and_update().is_ready());
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), receiver.changed())
+            .await
+            .expect("listener did not reconnect")
+            .unwrap();
+        assert!(receiver.borrow_and_update().is_ready());
+        task.abort();
+    }
+
+    async fn listener_pids(pool: &PgPool) -> BTreeSet<i32> {
+        sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity \
+             WHERE datname = current_database() \
+             AND query = 'LISTEN \"miden_note_transport_changes\"'",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect()
+    }
 }
