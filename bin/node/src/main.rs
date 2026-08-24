@@ -89,6 +89,12 @@ async fn main() -> Result<()> {
             info!(deleted, "Database cleanup completed");
         },
         Command::Serve(args) => {
+            if args.max_note_size > miden_note_transport_node::database::FETCH_NOTES_MAX_BYTES {
+                return Err(miden_note_transport_node::Error::Internal(format!(
+                    "max note size cannot exceed {} bytes",
+                    miden_note_transport_node::database::FETCH_NOTES_MAX_BYTES
+                )));
+            }
             let config = NodeConfig {
                 grpc: GrpcServerConfig {
                     host: args.host,
