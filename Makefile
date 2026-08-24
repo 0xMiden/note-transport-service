@@ -65,7 +65,7 @@ book: ## Builds the book & serves documentation site
 
 .PHONY: test
 test:  ## Runs all tests
-	$(BUILD_PROTO) cargo nextest run --workspace
+	@scripts/test.sh
 
 .PHONY: doc-test
 doc-test: ## Runs doc tests

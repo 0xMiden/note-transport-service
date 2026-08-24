@@ -22,6 +22,8 @@ enum Command {
     Migrate(DatabaseArgs),
     /// Delete one bounded batch of expired notes and exit.
     Cleanup(CleanupArgs),
+    /// Copy an offline SQLite database into empty PostgreSQL storage.
+    Copy(CopyArgs),
 }
 
 #[derive(Args)]
@@ -41,6 +43,17 @@ struct CleanupArgs {
 
     #[arg(long, default_value = "1000")]
     max_rows: u32,
+}
+
+#[derive(Args)]
+struct CopyArgs {
+    /// Path to the stopped SQLite database.
+    #[arg(long)]
+    sqlite: String,
+
+    /// URL of an empty, migrated PostgreSQL database.
+    #[arg(long, env = "MNT_DATABASE_URL")]
+    postgres: String,
 }
 
 #[derive(Args)]
@@ -87,6 +100,15 @@ async fn main() -> Result<()> {
             .await?;
             let deleted = database.cleanup_old_notes(args.retention_days, args.max_rows).await?;
             info!(deleted, "Database cleanup completed");
+        },
+        Command::Copy(args) => {
+            let copied = Database::copy_sqlite_to_postgres(
+                &DatabaseConfig::new(args.sqlite),
+                &DatabaseConfig::new(args.postgres),
+                Metrics::default().db,
+            )
+            .await?;
+            info!(copied, "SQLite notes copied and verified");
         },
         Command::Serve(args) => {
             if args.max_note_size > miden_note_transport_node::database::FETCH_NOTES_MAX_BYTES {

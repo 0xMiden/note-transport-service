@@ -1,9 +1,11 @@
 mod error;
+mod postgres;
 mod sqlite;
 
 use std::sync::Arc;
 
 pub use self::error::DatabaseError;
+use self::postgres::PostgresDatabase;
 use self::sqlite::SqliteDatabase;
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteTag, StoredNote};
@@ -24,6 +26,12 @@ pub enum StoreResult {
     Inserted,
     /// An identical envelope was already present.
     AlreadyPresent,
+}
+
+struct StorageSnapshot {
+    notes: Vec<StoredNote>,
+    next_cursor: i64,
+    retained_bytes: i64,
 }
 
 #[async_trait::async_trait]
@@ -52,7 +60,7 @@ trait DatabaseBackend: Send + Sync {
 /// Database connection configuration.
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {
-    /// SQLite file path.
+    /// SQLite file path or PostgreSQL connection URL.
     pub url: String,
     allow_in_memory: bool,
 }
@@ -71,6 +79,10 @@ impl DatabaseConfig {
             allow_in_memory: true,
         }
     }
+
+    fn is_postgres(&self) -> bool {
+        self.url.starts_with("postgres://") || self.url.starts_with("postgresql://")
+    }
 }
 
 #[derive(Clone)]
@@ -85,14 +97,41 @@ impl Database {
         config: DatabaseConfig,
         metrics: MetricsDatabase,
     ) -> Result<Self, DatabaseError> {
-        let backend: Arc<dyn DatabaseBackend> =
-            Arc::new(SqliteDatabase::connect(&config.url, config.allow_in_memory, metrics).await?);
+        let backend: Arc<dyn DatabaseBackend> = if config.is_postgres() {
+            Arc::new(PostgresDatabase::connect(&config.url, metrics).await?)
+        } else {
+            Arc::new(SqliteDatabase::connect(&config.url, config.allow_in_memory, metrics).await?)
+        };
         Ok(Self { backend })
     }
 
     /// Apply all schema migrations. Serving never calls this method.
     pub async fn migrate(config: &DatabaseConfig) -> Result<(), DatabaseError> {
-        SqliteDatabase::migrate(&config.url, config.allow_in_memory).await
+        if config.is_postgres() {
+            PostgresDatabase::migrate(&config.url).await
+        } else {
+            SqliteDatabase::migrate(&config.url, config.allow_in_memory).await
+        }
+    }
+
+    /// Copy a stopped SQLite database into an empty PostgreSQL database.
+    pub async fn copy_sqlite_to_postgres(
+        sqlite: &DatabaseConfig,
+        postgres: &DatabaseConfig,
+        metrics: MetricsDatabase,
+    ) -> Result<u64, DatabaseError> {
+        if sqlite.is_postgres() || !postgres.is_postgres() {
+            return Err(DatabaseError::Configuration(
+                "copy requires a SQLite source and PostgreSQL destination".to_string(),
+            ));
+        }
+        let source = SqliteDatabase::connect(&sqlite.url, false, metrics.clone()).await?;
+        let snapshot = source.export_all().await?;
+        let count = snapshot.notes.len() as u64;
+        let destination = PostgresDatabase::connect(&postgres.url, metrics).await?;
+        destination.import_all(&snapshot).await?;
+        destination.verify_import(&snapshot).await?;
+        Ok(count)
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -227,6 +266,62 @@ mod tests {
     #[tokio::test]
     async fn sqlite_backend_contract() {
         backend_contract(sqlite().await).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_backend_and_sqlite_copy_contract() {
+        let Ok(url) = std::env::var("MNT_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let config = DatabaseConfig::new(&url);
+        Database::migrate(&config).await.unwrap();
+        reset_postgres(&url).await;
+
+        let sqlite_file = tempfile::NamedTempFile::new().unwrap();
+        let sqlite_url = sqlite_file.path().to_string_lossy().into_owned();
+        let sqlite_config = DatabaseConfig::new(&sqlite_url);
+        Database::migrate(&sqlite_config).await.unwrap();
+        let sqlite = Database::connect(sqlite_config.clone(), Metrics::default().db).await.unwrap();
+        sqlite.store_note(&note(&[1]), u64::MAX).await.unwrap();
+        sqlite.store_note(&note(&[2]), u64::MAX).await.unwrap();
+
+        let copied =
+            Database::copy_sqlite_to_postgres(&sqlite_config, &config, Metrics::default().db)
+                .await
+                .unwrap();
+        assert_eq!(copied, 2);
+        let postgres = Database::connect(config.clone(), Metrics::default().db).await.unwrap();
+        assert_eq!(postgres.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap().len(), 2);
+
+        drop(postgres);
+        reset_postgres(&url).await;
+        sqlite.cleanup_old_notes(0, 2).await.unwrap();
+        assert_eq!(
+            Database::copy_sqlite_to_postgres(&sqlite_config, &config, Metrics::default().db)
+                .await
+                .unwrap(),
+            0
+        );
+        let postgres = Database::connect(config.clone(), Metrics::default().db).await.unwrap();
+        postgres.store_note(&note(&[3]), u64::MAX).await.unwrap();
+        let fetched = postgres.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        assert_eq!(fetched[0].seq, 3);
+
+        drop(postgres);
+        reset_postgres(&url).await;
+        backend_contract(Database::connect(config, Metrics::default().db).await.unwrap()).await;
+    }
+
+    async fn reset_postgres(url: &str) {
+        let pool = sqlx::PgPool::connect(url).await.unwrap();
+        sqlx::query("TRUNCATE TABLE notes").execute(&pool).await.unwrap();
+        sqlx::query(
+            "UPDATE storage_metadata SET next_cursor = 1, retained_bytes = 0 \
+             WHERE singleton = TRUE",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

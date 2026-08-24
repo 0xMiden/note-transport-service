@@ -19,11 +19,19 @@ This installs the `miden-note-transport-node` binary.
 
 ## Run the node
 
+Set the database URL. Production deployments use PostgreSQL:
+
+```bash
+export MNT_DATABASE_URL='postgres://user:password@database/note_transport'
+```
+
+SQLite remains supported for local deployments. Its database URL is a file path such as `/var/lib/miden-note-transport/node.db`.
+
 Create or update the database before starting the service:
 
 ```bash
 miden-note-transport-node migrate \
-  --database-url /var/lib/miden-note-transport/node.db
+  --database-url "$MNT_DATABASE_URL"
 ```
 
 Then start the service:
@@ -32,7 +40,7 @@ Then start the service:
 miden-note-transport-node serve \
   --host 0.0.0.0 \
   --port 57292 \
-  --database-url /var/lib/miden-note-transport/node.db \
+  --database-url "$MNT_DATABASE_URL" \
   --max-storage-bytes 1073741824
 ```
 
@@ -42,7 +50,7 @@ Run bounded retention cleanup as a separate operation:
 
 ```bash
 miden-note-transport-node cleanup \
-  --database-url /var/lib/miden-note-transport/node.db \
+  --database-url "$MNT_DATABASE_URL" \
   --retention-days 30 \
   --max-rows 1000
 ```
@@ -53,13 +61,25 @@ miden-note-transport-node cleanup \
 | --- | --- | --- |
 | `--host` | `127.0.0.1` | Address to bind to. |
 | `--port` | `57292` | gRPC port. |
-| `--database-url` | required | Existing SQLite database path. It can also come from `MNT_DATABASE_URL`. |
+| `--database-url` | required | Existing SQLite path or PostgreSQL URL. It can also come from `MNT_DATABASE_URL`. |
 | `--max-note-size` | `512000` | Maximum envelope size in bytes. |
 | `--max-connections` | `4096` | Maximum concurrent gRPC connections. |
 | `--request-timeout` | `4` | Per-request timeout in seconds. |
 | `--max-storage-bytes` | required | Maximum retained payload bytes. It can also come from `MNT_MAX_STORAGE_BYTES`. |
 
 The `migrate` command requires `--database-url`. The `cleanup` command also accepts `--retention-days` and `--max-rows`.
+
+## Copy SQLite to PostgreSQL
+
+Stop every process that can write to the SQLite database. Migrate an empty PostgreSQL database, then run:
+
+```bash
+miden-note-transport-node copy \
+  --sqlite /var/lib/miden-note-transport/node.db \
+  --postgres "$MNT_DATABASE_URL"
+```
+
+The destination must be empty. The command keeps each cursor and verifies row counts, envelope digests, retained bytes, and the next cursor before it succeeds. Keep the stopped SQLite file during the rollback window.
 
 ## Telemetry and logging
 
@@ -112,7 +132,7 @@ The gRPC server exposes the note transport API and the health service on port `5
 
 ## Database behavior
 
-The serving process requires an existing file-backed SQLite database. In-memory storage is available only to tests.
+The serving process requires a migrated PostgreSQL database or an existing file-backed SQLite database. In-memory storage is available only to tests.
 
 The database assigns monotonic cursors and tracks retained payload bytes in the same write transaction. An identical envelope retry succeeds without adding another row. Fetches and cleanup are bounded by their configured limits.
 
