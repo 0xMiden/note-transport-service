@@ -3,9 +3,6 @@ mod sqlite;
 
 use std::sync::Arc;
 
-use miden_protocol::crypto::ies::SealedMessage;
-use miden_protocol::utils::serde::Deserializable;
-
 pub use self::error::DatabaseError;
 use self::sqlite::SqliteDatabase;
 use crate::metrics::MetricsDatabase;
@@ -162,22 +159,12 @@ pub(crate) fn envelope_digest(note: &StoredNote) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-pub(crate) fn validate_sealed_details(note: &StoredNote) -> Result<(), DatabaseError> {
-    SealedMessage::read_from_bytes(&note.details).map_err(|_| {
-        DatabaseError::Migration(format!(
-            "note at cursor {} does not contain sealed details",
-            note.seq
-        ))
-    })?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
     use miden_protocol::crypto::dsa::eddsa_25519_sha512::KeyExchangeKey;
     use miden_protocol::crypto::ies::SealingKey;
-    use miden_protocol::utils::serde::Serializable;
+    use miden_protocol::utils::serde::{Deserializable, Serializable};
 
     use super::*;
     use crate::metrics::Metrics;
@@ -222,6 +209,9 @@ mod tests {
         let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
         assert_eq!(fetched.len(), 2);
         assert!(fetched[0].seq < fetched[1].seq);
+
+        let legacy_cursor = 1_000_000_000_001;
+        assert_eq!(db.fetch_notes(TAG_LOCAL_ANY.into(), legacy_cursor).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -247,6 +237,18 @@ mod tests {
         assert!(fetched.is_empty());
         assert_eq!(db.cleanup_old_notes(1, 1).await.unwrap(), 1);
         assert_eq!(db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn envelopes_larger_than_a_fetch_page_are_rejected() {
+        let db = sqlite().await;
+        let mut oversized = note(&[1]);
+        oversized.details = vec![0; FETCH_NOTES_MAX_BYTES + 1];
+
+        assert!(matches!(
+            db.store_note(&oversized, u64::MAX).await,
+            Err(DatabaseError::Capacity(_))
+        ));
     }
 
     #[test]

@@ -7,17 +7,12 @@ use miden_protocol::utils::serde::{Deserializable, Serializable};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
-use super::{
-    DatabaseBackend,
-    DatabaseError,
-    StoreResult,
-    envelope_digest,
-    validate_sealed_details,
-};
+use super::{DatabaseBackend, DatabaseError, StoreResult, envelope_digest};
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteTag, StoredNote};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("src/database/sqlite/migrations");
+const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
 
 pub struct SqliteDatabase {
     pool: SqlitePool,
@@ -68,6 +63,13 @@ impl DatabaseBackend for SqliteDatabase {
         max_retained_bytes: u64,
     ) -> Result<StoreResult, DatabaseError> {
         let timer = self.metrics.db_store_note();
+        let envelope_bytes = note.header.to_bytes().len() + note.details.len();
+        if envelope_bytes > super::FETCH_NOTES_MAX_BYTES {
+            return Err(DatabaseError::Capacity(format!(
+                "envelope exceeds the {} byte fetch limit",
+                super::FETCH_NOTES_MAX_BYTES
+            )));
+        }
         let digest = envelope_digest(note);
         let mut tx = self.pool.begin().await.map_err(query_error)?;
 
@@ -94,7 +96,7 @@ impl DatabaseBackend for SqliteDatabase {
             return Ok(StoreResult::AlreadyPresent);
         }
 
-        let retained_bytes = i64::try_from(note.header.to_bytes().len() + note.details.len())
+        let retained_bytes = i64::try_from(envelope_bytes)
             .map_err(|_| DatabaseError::Serialization("note is too large".to_string()))?;
         let next_retained = current_retained
             .checked_add(retained_bytes)
@@ -150,7 +152,8 @@ impl DatabaseBackend for SqliteDatabase {
             timer.finish("ok");
             return Ok(Vec::new());
         }
-        let cursor = i64::try_from(cursor).map_err(|_| {
+        let effective_cursor = if cursor > LEGACY_CURSOR_THRESHOLD { 0 } else { cursor };
+        let cursor = i64::try_from(effective_cursor).map_err(|_| {
             DatabaseError::QueryExecution("cursor exceeds SQLite range".to_string())
         })?;
         let max_bytes = i64::try_from(max_bytes)
@@ -325,7 +328,6 @@ async fn finalize_migration(pool: &SqlitePool) -> Result<(), DatabaseError> {
     let mut tx = pool.begin().await.map_err(query_error)?;
     for row in &rows {
         let note = row_to_note(row)?;
-        validate_sealed_details(&note)?;
         if note.header.to_bytes().len() + note.details.len() > super::FETCH_NOTES_MAX_BYTES {
             return Err(DatabaseError::Migration(format!(
                 "note at cursor {} exceeds the V1 envelope limit",
