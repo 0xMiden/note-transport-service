@@ -25,6 +25,3 @@ node_modules/
 *DS_Store
 *.iml
 book/
-
-# Local design notes
-/docs/local/
