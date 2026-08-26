@@ -42,6 +42,11 @@ use crate::metrics::MetricsGrpc;
 /// being an attack surface.
 const MAX_TAGS_PER_FETCH_REQUEST: usize = 128;
 
+/// Cursors above this value are pre-`seq` microsecond timestamps. The database
+/// resets them to 0 when fetching; the response cursor must use the same
+/// effective value or a legacy client will keep resending the same first page.
+const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
+
 /// Miden Note Transport gRPC server
 pub struct GrpcServer {
     database: Arc<Database>,
@@ -258,7 +263,10 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             .await
             .map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
 
-        let mut rcursor = cursor;
+        // The DB treats pre-`seq` microsecond cursors as 0. Seed the response
+        // cursor from that same effective value so a legacy client can advance
+        // to the returned sequence ids instead of resending its old timestamp.
+        let mut rcursor = if cursor > LEGACY_CURSOR_THRESHOLD { 0 } else { cursor };
         for stored_note in &stored_notes {
             let seq_cursor: u64 = stored_note
                 .seq
@@ -394,5 +402,27 @@ mod tests {
         let response = result.expect("request at the cap must succeed").into_inner();
         assert_eq!(response.notes.len(), 0, "DB is empty, no notes returned");
         assert_eq!(response.cursor, 0);
+    }
+
+    /// Legacy pre-`seq` timestamp cursors are reset by the DB query. The gRPC
+    /// response must converge to that reset value as well, otherwise the client
+    /// sends the same legacy cursor forever and repeatedly fetches page one.
+    #[tokio::test]
+    async fn test_fetch_notes_legacy_cursor_response_converges() {
+        let server = test_server().await;
+        let legacy_cursor = LEGACY_CURSOR_THRESHOLD + 1;
+
+        let request = tonic::Request::new(FetchNotesRequest {
+            tags: vec![0],
+            cursor: legacy_cursor,
+        });
+        let response = server
+            .fetch_notes(request)
+            .await
+            .expect("legacy cursor request must succeed")
+            .into_inner();
+
+        assert!(response.notes.is_empty(), "test DB is empty");
+        assert_eq!(response.cursor, 0, "response cursor must use the DB's effective reset cursor");
     }
 }
