@@ -96,7 +96,15 @@ impl GrpcServer {
     }
 
     /// gRPC server running-task
-    pub async fn serve(self) -> crate::Result<()> {
+    ///
+    /// Serves until `shutdown` resolves, at which point tonic stops accepting new connections and
+    /// waits for in-flight requests to finish before returning. Dropping the service afterwards
+    /// stops the note streamer, which sends its subscribers a `GOAWAY` rather than having their
+    /// connections cut.
+    pub async fn serve_with_shutdown(
+        self,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> crate::Result<()> {
         let (health_reporter, health_svc) = tonic_health::server::health_reporter();
         health_reporter.set_serving::<MidenNoteTransportServer<Self>>().await;
 
@@ -123,9 +131,13 @@ impl GrpcServer {
             .add_service(health_svc)
             .add_service(reflection_svc)
             .add_service(self.into_service())
-            .serve(addr)
+            .serve_with_shutdown(addr, shutdown)
             .await
-            .map_err(|e| crate::Error::Internal(format!("Server error: {e}")))
+            .map_err(|e| crate::Error::Internal(format!("Server error: {e}")))?;
+
+        tracing::info!("gRPC server drained");
+
+        Ok(())
     }
 }
 
