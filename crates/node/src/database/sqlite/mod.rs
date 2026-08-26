@@ -19,6 +19,14 @@ use models::{NewNote, Note};
 /// backlogged client paginates naturally by re-calling with the returned cursor.
 pub(crate) const FETCH_NOTES_BATCH_SIZE: i64 = 500;
 
+/// Maximum number of expired notes deleted per transaction by `cleanup_old_notes`.
+///
+/// Retention cleanup is a background job with no deadline, so the batch size trades total
+/// throughput for how long the writer lock is held in one go. 10k rows keeps a single batch to a
+/// few milliseconds even on a cold page cache, well inside the window in which a concurrent
+/// `store_note` will still complete.
+const CLEANUP_BATCH_SIZE: i64 = 10_000;
+
 /// Threshold above which a `fetch_notes` cursor is interpreted as a legacy
 /// microsecond-timestamp cursor from the pre-`seq` schema and reset to 0.
 ///
@@ -38,6 +46,60 @@ pub struct SqliteDatabase {
 }
 
 impl SqliteDatabase {
+    /// Delete every note created before `cutoff_timestamp`, `batch_size` rows per transaction.
+    ///
+    /// Deleting the whole expired set in one statement holds the writer lock for its entire
+    /// duration and grows the WAL by the size of the transaction. After downtime or a retention
+    /// change that set can be millions of rows, which is long enough to push concurrent
+    /// `store_note` calls past the busy timeout. Batching bounds both.
+    ///
+    /// Returns the total number of notes deleted.
+    async fn cleanup_notes_before(
+        &self,
+        cutoff_timestamp: i64,
+        batch_size: i64,
+    ) -> Result<u64, DatabaseError> {
+        let mut total_deleted: u64 = 0;
+
+        loop {
+            let deleted: i64 = self
+                .transact("cleanup old notes", move |conn| {
+                    use schema::notes::dsl::{created_at, notes, seq};
+
+                    // `DELETE ... LIMIT` needs SQLITE_ENABLE_UPDATE_DELETE_LIMIT, which is not
+                    // enabled in every libsqlite3 build, so bound the batch by selecting primary
+                    // keys first. Oldest first, so a run interrupted part-way still makes forward
+                    // progress.
+                    let doomed = notes
+                        .select(seq)
+                        .filter(created_at.lt(cutoff_timestamp))
+                        .order(seq.asc())
+                        .limit(batch_size)
+                        .load::<i64>(conn)?;
+
+                    if doomed.is_empty() {
+                        return Ok(0);
+                    }
+
+                    let count = diesel::delete(notes.filter(seq.eq_any(doomed))).execute(conn)?;
+                    Ok(i64::try_from(count).unwrap_or(0))
+                })
+                .await?;
+
+            total_deleted = total_deleted.saturating_add(deleted.try_into().unwrap_or(0));
+
+            // A short batch means the expired set is exhausted.
+            if deleted < batch_size {
+                break;
+            }
+
+            // Give writers a chance at the lock between batches.
+            tokio::task::yield_now().await;
+        }
+
+        Ok(total_deleted)
+    }
+
     /// Execute a query within a transaction
     async fn transact<R, Q, M>(&self, msg: M, query: Q) -> Result<R, DatabaseError>
     where
@@ -233,18 +295,9 @@ impl DatabaseBackend for SqliteDatabase {
 
     async fn cleanup_old_notes(&self, retention_days: u32) -> Result<u64, DatabaseError> {
         let cutoff_date = Utc::now() - chrono::Duration::days(i64::from(retention_days));
-        let cutoff_timestamp = cutoff_date.timestamp_micros();
 
-        let deleted_count: i64 = self
-            .transact("cleanup old notes", move |conn| {
-                use schema::notes::dsl::{created_at, notes};
-                let count =
-                    diesel::delete(notes.filter(created_at.lt(cutoff_timestamp))).execute(conn)?;
-                Ok(i64::try_from(count).unwrap_or(0))
-            })
-            .await?;
-
-        Ok(deleted_count.try_into().unwrap_or(0))
+        self.cleanup_notes_before(cutoff_date.timestamp_micros(), CLEANUP_BATCH_SIZE)
+            .await
     }
 
     async fn note_exists(&self, note_id: NoteId) -> Result<bool, DatabaseError> {
@@ -258,5 +311,103 @@ impl DatabaseBackend for SqliteDatabase {
             .await?;
 
         Ok(count > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::Metrics;
+    use crate::test_utils::test_note_header;
+
+    /// Store `count` notes, all stamped at `created_at`.
+    async fn store_notes_at(db: &SqliteDatabase, count: usize, created_at: chrono::DateTime<Utc>) {
+        for _ in 0..count {
+            let note = StoredNote {
+                header: test_note_header(),
+                details: vec![1, 2, 3],
+                created_at,
+                seq: 0,
+                after_block_num: None,
+            };
+            db.store_note(&note).await.unwrap();
+        }
+    }
+
+    async fn test_db() -> SqliteDatabase {
+        SqliteDatabase::connect(DatabaseConfig::default(), Metrics::default().db)
+            .await
+            .unwrap()
+    }
+
+    /// The expired set is deleted in full even when it spans many batches, and the loop
+    /// terminates rather than spinning on the final short batch.
+    #[tokio::test]
+    async fn cleanup_deletes_every_expired_note_across_batches() {
+        let db = test_db().await;
+        let old = Utc::now() - chrono::Duration::days(60);
+
+        store_notes_at(&db, 7, old).await;
+
+        // A batch size well below the row count forces several passes, with the last one short.
+        let deleted = db.cleanup_notes_before(Utc::now().timestamp_micros(), 2).await.unwrap();
+
+        assert_eq!(deleted, 7);
+        assert_eq!(db.get_stats().await.unwrap().0, 0);
+    }
+
+    /// Only notes older than the cutoff are deleted; the batching must not run past it.
+    #[tokio::test]
+    async fn cleanup_keeps_notes_newer_than_the_cutoff() {
+        let db = test_db().await;
+        let old = Utc::now() - chrono::Duration::days(60);
+        let recent = Utc::now();
+
+        store_notes_at(&db, 5, old).await;
+        store_notes_at(&db, 3, recent).await;
+
+        let cutoff = (Utc::now() - chrono::Duration::days(30)).timestamp_micros();
+        let deleted = db.cleanup_notes_before(cutoff, 2).await.unwrap();
+
+        assert_eq!(deleted, 5);
+        assert_eq!(db.get_stats().await.unwrap().0, 3);
+    }
+
+    /// Durability must not depend on how the linked libsqlite3 was built, so the pragmas are set
+    /// explicitly on every connection. `synchronous=FULL` is 2.
+    #[tokio::test]
+    async fn connections_are_opened_with_the_configured_durability_pragmas() {
+        #[derive(QueryableByName)]
+        struct PragmaValue {
+            #[diesel(sql_type = diesel::sql_types::Integer)]
+            value: i32,
+        }
+
+        let db = test_db().await;
+
+        let synchronous = db
+            .query("read synchronous pragma", |conn| {
+                Ok(diesel::sql_query("SELECT synchronous AS value FROM pragma_synchronous")
+                    .load::<PragmaValue>(conn)?
+                    .first()
+                    .map(|row| row.value)
+                    .unwrap_or_default())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(synchronous, 2, "expected PRAGMA synchronous=FULL");
+    }
+
+    /// Nothing to delete must be one empty pass, not an error and not a loop.
+    #[tokio::test]
+    async fn cleanup_on_an_empty_expired_set_is_a_no_op() {
+        let db = test_db().await;
+        store_notes_at(&db, 3, Utc::now()).await;
+
+        let cutoff = (Utc::now() - chrono::Duration::days(30)).timestamp_micros();
+
+        assert_eq!(db.cleanup_notes_before(cutoff, 2).await.unwrap(), 0);
+        assert_eq!(db.get_stats().await.unwrap().0, 3);
     }
 }
