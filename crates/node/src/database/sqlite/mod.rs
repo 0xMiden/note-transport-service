@@ -247,6 +247,14 @@ impl DatabaseBackend for SqliteDatabase {
         Ok(deleted_count.try_into().unwrap_or(0))
     }
 
+    async fn health_check(&self) -> Result<(), DatabaseError> {
+        self.query("health check", |conn| {
+            diesel::sql_query("SELECT 1").execute(conn)?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn note_exists(&self, note_id: NoteId) -> Result<bool, DatabaseError> {
         let count: i64 = self
             .query("check note existence", move |conn| {
@@ -258,5 +266,38 @@ impl DatabaseBackend for SqliteDatabase {
             .await?;
 
         Ok(count > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::Metrics;
+
+    async fn test_db() -> SqliteDatabase {
+        SqliteDatabase::connect(DatabaseConfig::default(), Metrics::default().db)
+            .await
+            .unwrap()
+    }
+
+    /// The probe behind the gRPC health status must succeed while the database can serve queries.
+    #[tokio::test]
+    async fn health_check_passes_on_a_reachable_database() {
+        let db = test_db().await;
+
+        assert!(db.health_check().await.is_ok());
+    }
+
+    /// It must fail when the pool can no longer hand out connections. This is the case that used
+    /// to go unnoticed: the health status was set once at startup, so an exhausted pool or a
+    /// wedged database still advertised the node as SERVING.
+    #[tokio::test]
+    async fn health_check_fails_when_the_pool_cannot_serve() {
+        let db = test_db().await;
+        assert!(db.health_check().await.is_ok());
+
+        db.pool.close();
+
+        assert!(db.health_check().await.is_err(), "a closed pool must fail the health check");
     }
 }

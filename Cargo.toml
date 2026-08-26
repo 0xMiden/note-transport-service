@@ -51,7 +51,12 @@ serde = { features = ["derive"], version = "1.0" }
 serde_json = { version = "1.0" }
 serial_test = { version = "3.2" }
 thiserror = { default-features = false, version = "2.0" }
-tokio = { features = ["macros", "net", "rt-multi-thread"], version = "1.48" }
+tokio = { features = [
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "signal",
+], version = "1.48" }
 tonic = { default-features = false, features = ["codegen", "transport"], version = "0.14" }
 tonic-health = { version = "0.14" }
 tonic-prost = { version = "0.14" }

@@ -1,8 +1,10 @@
+use std::time::Duration;
+
 use clap::Parser;
 use miden_note_transport_node::database::DatabaseConfig;
 use miden_note_transport_node::logging::{TracingConfig, setup_tracing};
 use miden_note_transport_node::node::grpc::GrpcServerConfig;
-use miden_note_transport_node::{Node, NodeConfig, Result};
+use miden_note_transport_node::{Node, NodeConfig, Result, shutdown};
 use tracing::info;
 
 #[derive(Parser)]
@@ -36,6 +38,13 @@ struct Args {
     /// Connection timeout in seconds
     #[arg(long, default_value = "4")]
     request_timeout: usize,
+
+    /// Seconds to keep serving after reporting `NOT_SERVING` on shutdown
+    ///
+    /// Should cover at least one health-check interval of whatever load balancer fronts the
+    /// service, so it stops routing here before the node stops accepting. 0 drains immediately.
+    #[arg(long, default_value = "12")]
+    shutdown_grace_secs: u64,
 }
 
 #[tokio::main]
@@ -47,7 +56,7 @@ async fn main() -> Result<()> {
     // endpoint env var is set (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or
     // OTEL_EXPORTER_OTLP_ENDPOINT).
     let tracing_cfg = TracingConfig::from_otel_env();
-    setup_tracing(tracing_cfg.clone())?;
+    let telemetry = setup_tracing(tracing_cfg.clone())?;
 
     info!("Starting Miden Transport Node...");
     info!("Host: {}", args.host);
@@ -69,6 +78,7 @@ async fn main() -> Result<()> {
             max_note_size: args.max_note_size,
             max_connections: args.max_connections,
             request_timeout: args.request_timeout,
+            shutdown_grace: Duration::from_secs(args.shutdown_grace_secs),
         },
         database: DatabaseConfig {
             url: args.database_url,
@@ -76,9 +86,14 @@ async fn main() -> Result<()> {
         },
     };
 
-    // Run Node
+    // Run Node until a shutdown signal arrives
     let node = Node::init(config).await?;
-    node.entrypoint().await;
+    let result = node.entrypoint(shutdown::signal()).await;
 
-    Ok(())
+    // Flush buffered spans and metrics last, so everything the shutdown itself emitted is
+    // exported rather than dying with the process.
+    telemetry.shutdown();
+    info!("Shutdown complete");
+
+    result
 }
