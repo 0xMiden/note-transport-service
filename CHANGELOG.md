@@ -31,6 +31,12 @@ Skip the changelog only when the PR contains no runtime-affecting changes
 (docs, CI, tooling, tests). In that case the hook will tell you to apply the
 `no changelog` label instead.
 
+## v0.5.0-rc.2 (2026-08-27)
+
+### Features
+
+- Added a `version` field to `StatsResponse` reporting the deployed node version, for display on the status page ([#153](https://github.com/0xMiden/note-transport-service/pull/153)).
+
 ## v0.5.0-rc.1 (2026-08-18)
 
 ### Features
