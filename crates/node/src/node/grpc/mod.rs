@@ -39,6 +39,7 @@ use crate::metrics::MetricsGrpc;
 /// being an attack surface.
 const MAX_TAGS_PER_FETCH_REQUEST: usize = 128;
 const READINESS_TIMEOUT: Duration = Duration::from_secs(1);
+const API_SERVICE_NAME: &str = "miden_note_transport.v1.MidenNoteTransport";
 
 /// Miden Note Transport gRPC server
 pub struct GrpcServer {
@@ -115,12 +116,17 @@ impl GrpcServer {
 
         let database = self.database.clone();
         let readiness_shutdown = self.shutdown.clone();
-        let readiness_reporter = health_reporter.clone();
+        let mut readiness_reporter = health_reporter.clone();
         let readiness_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     () = readiness_shutdown.cancelled() => {
                         set_api_health(&readiness_reporter, false).await;
+                        readiness_reporter
+                            .set_service_status("", tonic_health::ServingStatus::NotServing)
+                            .await;
+                        readiness_reporter.clear_service_status(API_SERVICE_NAME).await;
+                        readiness_reporter.clear_service_status("").await;
                         return;
                     },
                     () = tokio::time::sleep(Duration::from_secs(1)) => {
@@ -695,7 +701,7 @@ mod tests {
         let mut client = tonic_health::pb::health_client::HealthClient::new(channel);
         let mut health_watch = client
             .watch(tonic::Request::new(tonic_health::pb::HealthCheckRequest {
-                service: "miden_note_transport.v1.MidenNoteTransport".to_string(),
+                service: API_SERVICE_NAME.to_string(),
             }))
             .await
             .unwrap()
@@ -713,8 +719,11 @@ mod tests {
             update.status,
             tonic_health::pb::health_check_response::ServingStatus::NotServing as i32
         );
-        drop(health_watch);
-        drop(client);
+        let ended = tokio::time::timeout(Duration::from_secs(1), health_watch.message())
+            .await
+            .expect("API health watch did not close")
+            .unwrap();
+        assert!(ended.is_none());
         tokio::time::timeout(Duration::from_secs(1), server_task)
             .await
             .expect("server did not stop after the health watch closed")
