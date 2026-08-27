@@ -11,7 +11,7 @@ use super::{
     DatabaseBackend,
     DatabaseError,
     DatabaseWatch,
-    StorageMetadata,
+    FetchPage,
     StoreResult,
     envelope_digest,
 };
@@ -60,38 +60,6 @@ impl SqliteDatabase {
         let pool = open_pool(url, allow_in_memory, true).await?;
         MIGRATOR.run(&pool).await.map_err(migration_error)?;
         finalize_migration(&pool).await
-    }
-
-    pub async fn copy_metadata(&self) -> Result<StorageMetadata, DatabaseError> {
-        let row = sqlx::query(
-            "SELECT (SELECT COUNT(*) FROM notes) AS row_count, next_cursor, retained_bytes \
-             FROM storage_metadata WHERE singleton = 1",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(query_error)?;
-        Ok(StorageMetadata {
-            row_count: row.try_get("row_count").map_err(query_error)?,
-            next_cursor: row.try_get("next_cursor").map_err(query_error)?,
-            retained_bytes: row.try_get("retained_bytes").map_err(query_error)?,
-        })
-    }
-
-    pub async fn export_batch(&self, cursor: i64) -> Result<Vec<StoredNote>, DatabaseError> {
-        let rows = sqlx::query(
-            "SELECT seq, header, details, created_at, after_block_num FROM (\
-             SELECT seq, header, details, created_at, after_block_num, \
-             SUM(LENGTH(header) + LENGTH(details)) OVER (ORDER BY seq) AS running_bytes \
-             FROM notes WHERE seq > ? ORDER BY seq) \
-             WHERE running_bytes <= ? ORDER BY seq LIMIT ?",
-        )
-        .bind(cursor)
-        .bind(i64::try_from(super::FETCH_NOTES_MAX_BYTES).unwrap_or(i64::MAX))
-        .bind(i64::from(super::FETCH_NOTES_MAX_ROWS))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(query_error)?;
-        rows.iter().map(row_to_note).collect()
     }
 }
 
@@ -188,11 +156,11 @@ impl DatabaseBackend for SqliteDatabase {
         cursor: u64,
         max_rows: u32,
         max_bytes: usize,
-    ) -> Result<Vec<StoredNote>, DatabaseError> {
+    ) -> Result<FetchPage, DatabaseError> {
         let timer = self.metrics.db_fetch_notes();
         if tags.is_empty() {
             timer.finish("ok");
-            return Ok(Vec::new());
+            return Ok(FetchPage { notes: Vec::new(), has_more: false });
         }
         let cursor = i64::try_from(cursor).map_err(|_| {
             DatabaseError::QueryExecution("cursor exceeds SQLite range".to_string())
@@ -200,10 +168,13 @@ impl DatabaseBackend for SqliteDatabase {
         let max_bytes = i64::try_from(max_bytes)
             .map_err(|_| DatabaseError::QueryExecution("byte limit is too large".to_string()))?;
 
+        let candidate_limit = i64::from(max_rows) + 1;
         let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT seq, header, details, created_at, after_block_num FROM (\
+            "SELECT seq, header, details, created_at, after_block_num, candidate_count FROM (\
              SELECT seq, header, details, created_at, after_block_num, \
-             SUM(LENGTH(header) + LENGTH(details)) OVER (ORDER BY seq) AS running_bytes \
+             SUM(LENGTH(header) + LENGTH(details)) OVER (ORDER BY seq) AS running_bytes, \
+             COUNT(*) OVER () AS candidate_count FROM (\
+             SELECT seq, header, details, created_at, after_block_num \
              FROM notes WHERE seq > ",
         );
         query.push_bind(cursor).push(" AND tag IN (");
@@ -211,17 +182,24 @@ impl DatabaseBackend for SqliteDatabase {
         for tag in tags {
             separated.push_bind(i64::from(tag.as_u32()));
         }
-        separated.push_unseparated(") ");
+        separated.push_unseparated(") ORDER BY seq LIMIT ");
         query
-            .push("ORDER BY seq) WHERE running_bytes <= ")
+            .push_bind(candidate_limit)
+            .push(") AS candidates) AS bounded WHERE running_bytes <= ")
             .push_bind(max_bytes)
             .push(" ORDER BY seq LIMIT ")
             .push_bind(i64::from(max_rows));
 
         let rows = query.build().fetch_all(&self.pool).await.map_err(query_error)?;
-        let notes = rows.iter().map(row_to_note).collect();
+        let candidate_count = rows
+            .first()
+            .map_or(Ok(0_i64), |row| row.try_get("candidate_count"))
+            .map_err(query_error)?;
+        let notes: Result<Vec<_>, _> = rows.iter().map(row_to_note).collect();
+        let notes = notes?;
+        let has_more = candidate_count > i64::try_from(notes.len()).unwrap_or(i64::MAX);
         timer.finish("ok");
-        notes
+        Ok(FetchPage { notes, has_more })
     }
 
     async fn cleanup_old_notes(

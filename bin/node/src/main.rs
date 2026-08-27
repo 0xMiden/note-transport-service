@@ -22,8 +22,6 @@ enum Command {
     Migrate(DatabaseArgs),
     /// Delete one bounded batch of expired notes and exit.
     Cleanup(CleanupArgs),
-    /// Copy an offline SQLite database into empty PostgreSQL storage.
-    Copy(CopyArgs),
 }
 
 #[derive(Args)]
@@ -38,22 +36,11 @@ struct CleanupArgs {
     #[command(flatten)]
     database: DatabaseArgs,
 
-    #[arg(long, default_value = "30")]
+    #[arg(long, env = "MNT_RETENTION_DAYS", default_value = "30")]
     retention_days: u32,
 
-    #[arg(long, default_value = "1000")]
+    #[arg(long, env = "MNT_CLEANUP_MAX_ROWS", default_value = "1000")]
     max_rows: u32,
-}
-
-#[derive(Args)]
-struct CopyArgs {
-    /// Path to the stopped SQLite database.
-    #[arg(long)]
-    sqlite: String,
-
-    /// URL of an empty, migrated PostgreSQL database.
-    #[arg(long, env = "MNT_DATABASE_URL")]
-    postgres: String,
 }
 
 #[derive(Args)]
@@ -61,19 +48,16 @@ struct ServeArgs {
     #[command(flatten)]
     database: DatabaseArgs,
 
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
+    #[arg(long, env = "MNT_LISTEN", default_value = "127.0.0.1:57292")]
+    listen: std::net::SocketAddr,
 
-    #[arg(long, default_value = "57292")]
-    port: u16,
-
-    #[arg(long, default_value = "512000")]
+    #[arg(long, env = "MNT_MAX_NOTE_SIZE", default_value = "512000")]
     max_note_size: usize,
 
-    #[arg(long, default_value = "4096")]
+    #[arg(long, env = "MNT_MAX_CONNECTIONS", default_value = "4096")]
     max_connections: usize,
 
-    #[arg(long, default_value = "4")]
+    #[arg(long, env = "MNT_REQUEST_TIMEOUT", default_value = "4")]
     request_timeout: usize,
 
     /// Maximum number of live `StreamNotes` requests.
@@ -105,20 +89,10 @@ async fn main() -> Result<()> {
             let deleted = database.cleanup_old_notes(args.retention_days, args.max_rows).await?;
             info!(deleted, "Database cleanup completed");
         },
-        Command::Copy(args) => {
-            let copied = Database::copy_sqlite_to_postgres(
-                &DatabaseConfig::new(args.sqlite),
-                &DatabaseConfig::new(args.postgres),
-                Metrics::default().db,
-            )
-            .await?;
-            info!(copied, "SQLite notes copied and verified");
-        },
         Command::Serve(args) => {
             let config = NodeConfig {
                 grpc: GrpcServerConfig {
-                    host: args.host,
-                    port: args.port,
+                    listen: args.listen,
                     max_note_size: args.max_note_size,
                     max_connections: args.max_connections,
                     request_timeout: args.request_timeout,

@@ -25,28 +25,13 @@ services:
       postgres:
         condition: service_healthy
 
-  copy-sqlite:
-    profiles: [upgrade]
-    user: root
-    build:
-      context: .
-      dockerfile: bin/node/docker/Dockerfile
-    command: ["copy", "--sqlite", "/legacy/node.db"]
-    environment:
-      MNT_DATABASE_URL: postgres://note_transport:local-only@postgres/note_transport
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-    volumes:
-      - node_data:/legacy
-
   note-transport:
     build:
       context: .
       dockerfile: bin/node/docker/Dockerfile
     ports:
       - "57292:57292"  # gRPC
-    command: ["serve", "--host", "0.0.0.0"]
+    command: ["serve", "--listen", "0.0.0.0:57292"]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -61,5 +46,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  node_data:
   postgres_data:

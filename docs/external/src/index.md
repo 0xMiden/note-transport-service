@@ -49,4 +49,4 @@ Private note contents are not published on-chain. The chain stores note commitme
 
 ## Current implementation
 
-The current node implementation is a Rust gRPC service backed by SQLite. It stores each envelope under a monotonic cursor, uses that cursor for `FetchNotes` pagination, and can export traces and metrics through OpenTelemetry.
+The node is a Rust gRPC service with SQLite and PostgreSQL storage. It stores each envelope under a monotonic cursor, uses that cursor for `FetchNotes` pagination, and can export traces and metrics through OpenTelemetry.

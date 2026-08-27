@@ -43,4 +43,4 @@ EXPOSE 57292
 
 USER mnt
 ENTRYPOINT ["miden-note-transport-node"]
-CMD ["serve", "--host", "0.0.0.0"]
+CMD ["serve", "--listen", "0.0.0.0:57292"]

@@ -37,7 +37,7 @@ message TransportNote {
 }
 ```
 
-`header` must be a serialized Miden `NoteHeader`. The node parses it to extract the note ID and tag. `details` is opaque to the transport node and may contain encrypted note details.
+`header` must be a serialized Miden `NoteHeader`. The node parses it to extract the note ID and tag. `details` must be a sealed message produced by the sender. The node checks its framing but cannot decrypt it.
 
 The server rejects:
 
@@ -60,6 +60,7 @@ message FetchNotesRequest {
 message FetchNotesResponse {
     repeated TransportNote notes = 1;
     fixed64 cursor = 2;
+    bool has_more = 3;
 }
 ```
 
@@ -69,11 +70,11 @@ Use this flow:
 2. Send all tags the client wants to check, up to 128 tags.
 3. Import or process the returned notes.
 4. Persist the response `cursor`.
-5. Repeat with the stored cursor.
+5. Repeat with the stored cursor while `has_more` is true.
 
-The response cursor is the highest server-side `seq` value returned in that response. Never fabricate cursor values; use values returned by the server.
+The response cursor is the highest server-side `seq` value returned in that response. A cursor belongs to the exact set of requested tags. Start again at `0` when that set changes.
 
-The server batch size is 500 notes. If a response contains many notes, call `FetchNotes` again with the returned cursor until the response is empty or smaller than the batch size.
+Each response is capped at 500 notes and 3 MiB. Use `has_more` because either limit can end a page.
 
 ## Stream notes
 
@@ -124,9 +125,9 @@ The transport node does not provide commitment block numbers or inclusion proofs
 - Check whether the note expired under the node retention policy.
 - Reset the local transport cursor to `0` if client state is suspected to be ahead of the server.
 
-### Duplicate send fails
+### Duplicate sends
 
-The database stores note IDs uniquely. Sending the same note twice is rejected instead of producing two stored rows.
+Sending the same envelope again succeeds without adding a row. A different sealed envelope may use the same note ID. Clients deduplicate imported notes by note ID.
 
 ### Streaming misses notes
 

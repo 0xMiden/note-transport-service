@@ -38,8 +38,7 @@ Then start the service:
 
 ```bash
 miden-note-transport-node serve \
-  --host 0.0.0.0 \
-  --port 57292 \
+  --listen 0.0.0.0:57292 \
   --database-url "$MNT_DATABASE_URL" \
   --max-storage-bytes 1073741824 \
   --max-streams 1024
@@ -60,28 +59,15 @@ miden-note-transport-node cleanup \
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--host` | `127.0.0.1` | Address to bind to. |
-| `--port` | `57292` | gRPC port. |
+| `--listen` | `127.0.0.1:57292` | Address and port to bind to. It can also come from `MNT_LISTEN`. |
 | `--database-url` | required | Existing SQLite path or PostgreSQL URL. It can also come from `MNT_DATABASE_URL`. |
-| `--max-note-size` | `512000` | Maximum envelope size in bytes. |
-| `--max-connections` | `4096` | Maximum concurrent requests and HTTP/2 streams per connection. |
-| `--request-timeout` | `4` | Per-request timeout in seconds. Active streaming responses are exempt. |
+| `--max-note-size` | `512000` | Maximum envelope size in bytes. It can also come from `MNT_MAX_NOTE_SIZE`. |
+| `--max-connections` | `4096` | Maximum concurrent requests and HTTP/2 streams per connection. It can also come from `MNT_MAX_CONNECTIONS`. |
+| `--request-timeout` | `4` | Per-request timeout in seconds. Active streaming responses are exempt. It can also come from `MNT_REQUEST_TIMEOUT`. |
 | `--max-streams` | `1024` | Maximum live `StreamNotes` requests. A slot remains held until its stream ends. |
 | `--max-storage-bytes` | required | Maximum retained payload bytes. It can also come from `MNT_MAX_STORAGE_BYTES`. |
 
-The `migrate` command requires `--database-url`. The `cleanup` command also accepts `--retention-days` and `--max-rows`.
-
-## Copy SQLite to PostgreSQL
-
-Stop every process that can write to the SQLite database. Migrate an empty PostgreSQL database, then run:
-
-```bash
-miden-note-transport-node copy \
-  --sqlite /var/lib/miden-note-transport/node.db \
-  --postgres "$MNT_DATABASE_URL"
-```
-
-The destination must be empty. The command keeps each cursor and verifies row counts, envelope digests, retained bytes, and the next cursor before it succeeds. Keep the stopped SQLite file during the rollback window.
+The `migrate` command requires `--database-url`. The `cleanup` command also accepts `--retention-days` and `--max-rows`. Those values can come from `MNT_RETENTION_DAYS` and `MNT_CLEANUP_MAX_ROWS`.
 
 ## Telemetry and logging
 
@@ -101,7 +87,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317 \
 JSON_LOGGING=true \
 RUST_LOG=INFO \
 miden-note-transport-node serve \
-  --host 0.0.0.0 \
+  --listen 0.0.0.0:57292 \
   --database-url /var/lib/miden-note-transport/node.db \
   --max-storage-bytes 1073741824
 ```
@@ -123,21 +109,6 @@ make docker-node-down
 to stop the stack.
 
 Compose waits for PostgreSQL, runs the migration command, and starts the node as an unprivileged user. PostgreSQL data remains in the `postgres_data` volume. Compose forwards either supported OTLP endpoint variable from the host environment or `.env` file.
-
-To upgrade an existing Compose deployment that used the `node_data` SQLite volume, stop the old stack before updating the checkout:
-
-```bash
-make docker-node-down
-```
-
-After updating the checkout, copy the database and start the new stack:
-
-```bash
-make docker-node-copy-sqlite
-make docker-node-up
-```
-
-The copy target starts PostgreSQL, applies its migrations, reads `node.db` from the existing `node_data` volume, and verifies the copy. Run these commands from the same checkout path or with the same Compose project name that created the old volume. Keep `node_data` until the rollback window ends.
 
 ## Ports
 

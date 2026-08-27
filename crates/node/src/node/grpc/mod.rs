@@ -30,7 +30,7 @@ use tower::limit::GlobalConcurrencyLimitLayer;
 use tower::timeout::TimeoutLayer;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::database::{Database, normalize_fetch_cursor};
+use crate::database::Database;
 use crate::metrics::MetricsGrpc;
 
 /// Upper bound on the number of tags a client may include in a single
@@ -58,10 +58,8 @@ pub struct GrpcServer {
 /// [`GrpcServer`] configuration
 #[derive(Clone, Debug)]
 pub struct GrpcServerConfig {
-    /// Server host
-    pub host: String,
-    /// Server port
-    pub port: u16,
+    /// Address and port to bind.
+    pub listen: SocketAddr,
     /// Maximum note size to be stored
     pub max_note_size: usize,
     /// Maximum number of concurrent connections
@@ -77,8 +75,7 @@ pub struct GrpcServerConfig {
 impl Default for GrpcServerConfig {
     fn default() -> Self {
         Self {
-            host: "127.0.0.1".to_string(),
-            port: 57292,
+            listen: "127.0.0.1:57292".parse().expect("default listen address must be valid"),
             max_note_size: 512_000,
             max_connections: 4096,
             request_timeout: 4,
@@ -109,11 +106,9 @@ impl GrpcServer {
 
     /// gRPC server running-task
     pub async fn serve(self) -> crate::Result<()> {
-        let addr = format!("{}:{}", self.config.host, self.config.port)
-            .parse::<SocketAddr>()
-            .map_err(|e| crate::Error::Internal(format!("Invalid address: {e}")))?;
-        let incoming = TcpIncoming::bind(addr)
-            .map_err(|e| crate::Error::Internal(format!("Failed to bind {addr}: {e}")))?;
+        let listen = self.config.listen;
+        let incoming = TcpIncoming::bind(listen)
+            .map_err(|e| crate::Error::Internal(format!("Failed to bind {listen}: {e}")))?;
         self.serve_with_incoming(incoming).await
     }
 
@@ -424,7 +419,7 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         // and the previous per-tag loop happened to dedupe via BTreeSet.
         let tag_set: BTreeSet<_> = request_data.tags.into_iter().collect();
         let tags: Vec<crate::types::NoteTag> = tag_set.into_iter().map(Into::into).collect();
-        let cursor = normalize_fetch_cursor(request_data.cursor);
+        let cursor = request_data.cursor;
 
         let span = tracing::Span::current();
         span.record("tag_count", tags.len());
@@ -435,7 +430,7 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         // two per-tag queries and get leapfrogged when rcursor advanced past
         // its seq on the next fetch. A single `tag IN (…)` query reads all
         // matching rows in one consistent snapshot.
-        let stored_notes = self
+        let page = self
             .database
             .fetch_notes_by_tags(&tags, cursor)
             .await
@@ -445,7 +440,7 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
             })?;
 
         let mut rcursor = cursor;
-        for stored_note in &stored_notes {
+        for stored_note in &page.notes {
             let seq_cursor: u64 = stored_note
                 .seq
                 .try_into()
@@ -456,7 +451,7 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
             rcursor = rcursor.max(seq_cursor);
         }
 
-        let proto_notes: Vec<_> = stored_notes.into_iter().map(TransportNote::from).collect();
+        let proto_notes: Vec<_> = page.notes.into_iter().map(TransportNote::from).collect();
 
         span.record("notes_returned", proto_notes.len());
         span.record("response_cursor", rcursor);
@@ -469,7 +464,11 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
             proto_notes_size,
         );
 
-        Ok(tonic::Response::new(FetchNotesResponse { notes: proto_notes, cursor: rcursor }))
+        Ok(tonic::Response::new(FetchNotesResponse {
+            notes: proto_notes,
+            cursor: rcursor,
+            has_more: page.has_more,
+        }))
     }
 
     type StreamNotesStream = tonic::codegen::tokio_stream::wrappers::ReceiverStream<
@@ -489,7 +488,7 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         })?;
         let request_data = request.into_inner();
         let tag = request_data.tag.into();
-        let cursor = normalize_fetch_cursor(request_data.cursor);
+        let cursor = request_data.cursor;
         let database = self.database.clone();
         let changes = database.subscribe();
         let shutdown = self.shutdown.subscribe();
@@ -540,8 +539,8 @@ async fn stream_notes(
             },
         };
         match fetched {
-            Ok(notes) if !notes.is_empty() => {
-                let Ok(next_cursor) = crate::database::advance_cursor(&notes, cursor) else {
+            Ok(page) if !page.notes.is_empty() => {
+                let Ok(next_cursor) = crate::database::advance_cursor(&page.notes, cursor) else {
                     metrics.error("stream_notes", tonic::Code::Internal);
                     send_stream_error(&tx, &mut shutdown, Status::internal("invalid note cursor"))
                         .await;
@@ -550,7 +549,7 @@ async fn stream_notes(
                 cursor = next_cursor;
                 let update =
                     miden_note_transport_proto::miden_note_transport::v1::StreamNotesUpdate {
-                        notes: notes.into_iter().map(TransportNote::from).collect(),
+                        notes: page.notes.into_iter().map(TransportNote::from).collect(),
                         cursor,
                     };
                 tokio::select! {
@@ -698,48 +697,6 @@ mod tests {
         let response = result.expect("request at the cap must succeed").into_inner();
         assert_eq!(response.notes.len(), 0, "DB is empty, no notes returned");
         assert_eq!(response.cursor, 0);
-    }
-
-    #[tokio::test]
-    async fn legacy_cursor_advances_across_pages() {
-        let (server, database) = test_server_with_database().await;
-        for _ in 0..=crate::database::FETCH_NOTES_MAX_ROWS {
-            database
-                .store_note(
-                    &StoredNote {
-                        header: test_note_header(),
-                        details: vec![1],
-                        created_at: Utc::now(),
-                        seq: 0,
-                        after_block_num: None,
-                    },
-                    u64::MAX,
-                )
-                .await
-                .unwrap();
-        }
-
-        let first = server
-            .fetch_notes(tonic::Request::new(FetchNotesRequest {
-                tags: vec![TAG_LOCAL_ANY],
-                cursor: crate::database::LEGACY_CURSOR_THRESHOLD + 1,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(first.notes.len(), crate::database::FETCH_NOTES_MAX_ROWS as usize);
-        assert!(first.cursor < crate::database::LEGACY_CURSOR_THRESHOLD);
-
-        let second = server
-            .fetch_notes(tonic::Request::new(FetchNotesRequest {
-                tags: vec![TAG_LOCAL_ANY],
-                cursor: first.cursor,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(second.notes.len(), 1);
-        assert!(second.cursor > first.cursor);
     }
 
     #[tokio::test]
@@ -908,7 +865,7 @@ mod tests {
                 .unwrap();
         }
         let stored = database.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
-        let cursor = u64::try_from(stored[0].seq).unwrap();
+        let cursor = u64::try_from(stored.notes[0].seq).unwrap();
         let response = server
             .stream_notes(tonic::Request::new(StreamNotesRequest { tag: TAG_LOCAL_ANY, cursor }))
             .await
@@ -921,8 +878,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(update.notes.len(), 1);
-        assert_eq!(update.notes[0].details, stored[1].details);
-        assert_eq!(update.cursor, u64::try_from(stored[1].seq).unwrap());
+        assert_eq!(update.notes[0].details, stored.notes[1].details);
+        assert_eq!(update.cursor, u64::try_from(stored.notes[1].seq).unwrap());
     }
 
     #[tokio::test]
