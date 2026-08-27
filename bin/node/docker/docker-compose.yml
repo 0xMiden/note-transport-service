@@ -40,6 +40,7 @@ services:
       MNT_DATABASE_URL: postgres://note_transport:local-only@postgres/note_transport
       MNT_MAX_STORAGE_BYTES: "1073741824"
       OTEL_EXPORTER_OTLP_ENDPOINT:
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:
       RUST_LOG: info
     init: true

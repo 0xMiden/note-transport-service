@@ -75,8 +75,9 @@ Telemetry is configured through environment variables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | OTLP endpoint for trace and metric export. Setting it enables export. |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Shared OTLP endpoint that takes precedence when both endpoint variables are set. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Fallback OTLP endpoint for traces and metrics. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | OTLP trace endpoint. It takes precedence over the fallback. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | OTLP metric endpoint. It takes precedence over the fallback. |
 | `JSON_LOGGING` | `false` | Emits JSON logs when set to `true`. |
 | `RUST_LOG` | `INFO` | Standard Rust tracing filter. |
 
@@ -108,7 +109,7 @@ make docker-node-down
 
 to stop the stack.
 
-Compose waits for PostgreSQL, runs the migration command, and starts the node as an unprivileged user. PostgreSQL data remains in the `postgres_data` volume. Compose forwards either supported OTLP endpoint variable from the host environment or `.env` file.
+Compose waits for PostgreSQL, runs the migration command, and starts the node as an unprivileged user. PostgreSQL data remains in the `postgres_data` volume. Compose forwards the supported OTLP endpoint variables from the host environment or `.env` file.
 
 ## Ports
 

@@ -25,8 +25,10 @@ pub struct TracingConfig {
 pub enum OpenTelemetry {
     /// Enable OpenTelemetry export
     Enabled {
-        /// Endpoint
-        endpoint: String,
+        /// Trace exporter endpoint.
+        traces_endpoint: Option<String>,
+        /// Metric exporter endpoint.
+        metrics_endpoint: Option<String>,
     },
     /// Disable OpenTelemetry
     Disabled,
@@ -52,18 +54,19 @@ impl Drop for TracingGuard {
 impl TracingConfig {
     /// Build tracing configuration from the environment.
     ///
-    /// OpenTelemetry export is enabled when a standard OTLP endpoint is configured via
-    /// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` (the former
-    /// takes precedence). When neither is set, export is disabled.
+    /// Signal-specific endpoints take precedence over `OTEL_EXPORTER_OTLP_ENDPOINT`.
+    /// Export is disabled when no endpoint is set.
     pub fn from_otel_env() -> Self {
-        let endpoint = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-            .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
-            .ok()
-            .filter(|s| !s.is_empty());
+        let common_endpoint = endpoint_from_env("OTEL_EXPORTER_OTLP_ENDPOINT");
+        let traces_endpoint = endpoint_from_env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+            .or_else(|| common_endpoint.clone());
+        let metrics_endpoint =
+            endpoint_from_env("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").or(common_endpoint);
 
-        let otel = match endpoint {
-            Some(endpoint) => OpenTelemetry::Enabled { endpoint },
-            None => OpenTelemetry::Disabled,
+        let otel = if traces_endpoint.is_some() || metrics_endpoint.is_some() {
+            OpenTelemetry::Enabled { traces_endpoint, metrics_endpoint }
+        } else {
+            OpenTelemetry::Disabled
         };
 
         TracingConfig {
@@ -81,6 +84,24 @@ impl OpenTelemetry {
     pub fn is_enabled(&self) -> bool {
         matches!(self, OpenTelemetry::Enabled { .. })
     }
+
+    fn traces_endpoint(&self) -> Option<&str> {
+        match self {
+            OpenTelemetry::Enabled { traces_endpoint, .. } => traces_endpoint.as_deref(),
+            OpenTelemetry::Disabled => None,
+        }
+    }
+
+    fn metrics_endpoint(&self) -> Option<&str> {
+        match self {
+            OpenTelemetry::Enabled { metrics_endpoint, .. } => metrics_endpoint.as_deref(),
+            OpenTelemetry::Disabled => None,
+        }
+    }
+}
+
+fn endpoint_from_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|endpoint| !endpoint.is_empty())
 }
 
 /// Initializes tracing to stdout and optionally an open-telemetry exporter.
@@ -90,10 +111,10 @@ impl OpenTelemetry {
 ///
 /// The open-telemetry configuration is controlled via environment variables as defined in the
 /// [specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/protocol/exporter.md#opentelemetry-protocol-exporter)
-pub fn setup_tracing(cfg: TracingConfig) -> Result<TracingGuard> {
+pub fn setup_tracing(cfg: &TracingConfig) -> Result<TracingGuard> {
     let meter_provider = if cfg.otel.is_enabled() {
         opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
-        setup_metrics_export(&cfg.otel)?
+        setup_metrics_export(cfg.otel.metrics_endpoint())?
     } else {
         None
     };
@@ -102,7 +123,7 @@ pub fn setup_tracing(cfg: TracingConfig) -> Result<TracingGuard> {
     // `then_some`) to avoid crashing sync callers (with OpenTelemetry::Disabled set). Examples of
     // such callers are tests with logging enabled.
     let (otel_layer, tracer_provider) = {
-        if let OpenTelemetry::Enabled { endpoint } = cfg.otel {
+        if let Some(endpoint) = cfg.otel.traces_endpoint() {
             let exporter_builder =
                 opentelemetry_otlp::SpanExporter::builder().with_tonic().with_endpoint(endpoint);
             let exporter = exporter_builder.build()?;
@@ -123,8 +144,8 @@ pub fn setup_tracing(cfg: TracingConfig) -> Result<TracingGuard> {
 }
 
 /// Setup OpenTelemetry metrics export using the proper SDK API
-fn setup_metrics_export(otel_cfg: &OpenTelemetry) -> Result<Option<SdkMeterProvider>> {
-    if let OpenTelemetry::Enabled { endpoint } = otel_cfg {
+fn setup_metrics_export(endpoint: Option<&str>) -> Result<Option<SdkMeterProvider>> {
+    if let Some(endpoint) = endpoint {
         // Configure OTLP metrics pipeline
         let exporter = opentelemetry_otlp::MetricExporter::builder()
             .with_tonic()

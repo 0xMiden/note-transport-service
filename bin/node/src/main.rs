@@ -73,7 +73,7 @@ struct ServeArgs {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let tracing_config = TracingConfig::from_otel_env();
-    let _tracing_guard = setup_tracing(tracing_config)?;
+    let _tracing_guard = setup_tracing(&tracing_config)?;
 
     match cli.command {
         Command::Migrate(args) => {
