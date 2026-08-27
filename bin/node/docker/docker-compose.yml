@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: bin/node/docker/Dockerfile
-    command: ["miden-note-transport-node", "migrate", "--database-url", "/app/data/node.db"]
+    command: ["migrate", "--database-url", "/app/data/node.db"]
     volumes:
       - node_data:/app/data
 
