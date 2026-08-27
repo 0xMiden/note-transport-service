@@ -42,14 +42,12 @@ impl SqliteDatabase {
     ) -> Result<Self, DatabaseError> {
         let pool = open_pool(url, true, true).await?;
         MIGRATOR.run(&pool).await.map_err(migration_error)?;
-        finalize_migration(&pool).await?;
         Ok(Self { pool, metrics })
     }
 
     pub async fn migrate(url: &str, allow_in_memory: bool) -> Result<(), DatabaseError> {
         let pool = open_pool(url, allow_in_memory, true).await?;
-        MIGRATOR.run(&pool).await.map_err(migration_error)?;
-        finalize_migration(&pool).await
+        MIGRATOR.run(&pool).await.map_err(migration_error)
     }
 }
 
@@ -312,51 +310,7 @@ async fn verify_schema(pool: &SqlitePool) -> Result<(), DatabaseError> {
             "database schema is not current; run the migrate command".to_string(),
         ));
     }
-    let incomplete: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE envelope_digest IS NULL")
-            .fetch_one(pool)
-            .await
-            .map_err(query_error)?;
-    if incomplete != 0 {
-        return Err(DatabaseError::Migration(
-            "database migration is incomplete; rerun the migrate command".to_string(),
-        ));
-    }
     Ok(())
-}
-
-async fn finalize_migration(pool: &SqlitePool) -> Result<(), DatabaseError> {
-    let rows = sqlx::query(
-        "SELECT seq, header, details, created_at, after_block_num \
-         FROM notes WHERE envelope_digest IS NULL ORDER BY seq",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(query_error)?;
-    let mut tx = pool.begin().await.map_err(query_error)?;
-    for row in &rows {
-        let note = row_to_note(row)?;
-        if note.header.to_bytes().len() + note.details.len() > super::FETCH_NOTES_MAX_BYTES {
-            return Err(DatabaseError::Migration(format!(
-                "note at cursor {} exceeds the V1 envelope limit",
-                note.seq
-            )));
-        }
-        let digest = envelope_digest(&note);
-        sqlx::query("UPDATE notes SET envelope_digest = ? WHERE seq = ?")
-            .bind(digest.as_slice())
-            .bind(note.seq)
-            .execute(&mut *tx)
-            .await
-            .map_err(query_error)?;
-    }
-    sqlx::query(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_envelope_digest ON notes(envelope_digest)",
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(query_error)?;
-    tx.commit().await.map_err(query_error)
 }
 
 fn row_to_note(row: &SqliteRow) -> Result<StoredNote, DatabaseError> {
