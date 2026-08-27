@@ -860,17 +860,19 @@ mod tests {
             tx,
             terminal_tx,
             metrics.grpc,
-            Duration::from_millis(25),
+            Duration::from_secs(1),
         ));
         let updates = tonic::codegen::tokio_stream::wrappers::ReceiverStream::new(rx);
         let terminal = tonic::codegen::tokio_stream::wrappers::ReceiverStream::new(terminal_rx);
         let mut stream = updates.chain(terminal);
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("slow stream task did not reach its timeout")
+            .unwrap();
         let first = stream.next().await.unwrap().unwrap();
         assert_eq!(first.notes.len(), crate::database::FETCH_NOTES_MAX_ROWS as usize);
         let status = stream.next().await.unwrap().unwrap_err();
         assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
-        task.await.unwrap();
     }
 }
