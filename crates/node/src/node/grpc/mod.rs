@@ -392,14 +392,25 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         let tag = request_data.tag.into();
         let cursor = request_data.cursor;
         let database = self.database.clone();
-        let changes = database.subscribe();
+        let changes = database.subscribe(tag);
         let shutdown = self.shutdown.clone();
         let metrics = self.metrics.clone();
+        let operation_timeout = Duration::from_secs(self.config.request_timeout as u64);
         let (tx, rx) = mpsc::channel(1);
         tokio::spawn(async move {
             let _stream_slot = stream_slot;
             let _active_stream = metrics.stream_started();
-            stream_notes(database, tag, cursor, changes, shutdown, tx, metrics).await;
+            stream_notes(
+                database,
+                tag,
+                cursor,
+                changes,
+                shutdown,
+                tx,
+                metrics,
+                operation_timeout,
+            )
+            .await;
         });
 
         Ok(tonic::Response::new(
@@ -408,6 +419,7 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_notes(
     database: Arc<Database>,
     tag: crate::types::NoteTag,
@@ -418,6 +430,7 @@ async fn stream_notes(
         Result<miden_note_transport_proto::miden_note_transport::v1::StreamNotesUpdate, Status>,
     >,
     metrics: MetricsGrpc,
+    operation_timeout: Duration,
 ) {
     loop {
         if shutdown.is_cancelled() {
@@ -429,20 +442,39 @@ async fn stream_notes(
                 &tx,
                 &shutdown,
                 Status::unavailable("note storage change notifications are unavailable"),
+                operation_timeout,
             )
             .await;
             return;
         }
         let fetched = tokio::select! {
-            result = database.fetch_notes(tag, cursor) => result,
+            result = tokio::time::timeout(operation_timeout, database.fetch_notes(tag, cursor)) => {
+                if let Ok(result) = result {
+                    result
+                } else {
+                    metrics.error("stream_notes", tonic::Code::DeadlineExceeded);
+                    send_stream_error(
+                        &tx,
+                        &shutdown,
+                        Status::deadline_exceeded("note storage read timed out"),
+                        operation_timeout,
+                    ).await;
+                    return;
+                }
+            },
             () = shutdown.cancelled() => return,
         };
         match fetched {
             Ok(page) if !page.notes.is_empty() => {
                 let Ok(next_cursor) = crate::database::advance_cursor(&page.notes, cursor) else {
                     metrics.error("stream_notes", tonic::Code::Internal);
-                    send_stream_error(&tx, &shutdown, Status::internal("invalid note cursor"))
-                        .await;
+                    send_stream_error(
+                        &tx,
+                        &shutdown,
+                        Status::internal("invalid note cursor"),
+                        operation_timeout,
+                    )
+                    .await;
                     return;
                 };
                 cursor = next_cursor;
@@ -452,9 +484,14 @@ async fn stream_notes(
                         cursor,
                     };
                 tokio::select! {
-                    result = tx.send(Ok(update)) => {
-                        if result.is_err() {
-                            return;
+                    result = tokio::time::timeout(operation_timeout, tx.send(Ok(update))) => {
+                        match result {
+                            Ok(Ok(())) => {},
+                            Ok(Err(_)) => return,
+                            Err(_) => {
+                                metrics.error("stream_notes", tonic::Code::DeadlineExceeded);
+                                return;
+                            },
                         }
                     },
                     () = shutdown.cancelled() => return,
@@ -464,7 +501,13 @@ async fn stream_notes(
             Ok(_) => {},
             Err(error) => {
                 metrics.error("stream_notes", tonic::Code::Unavailable);
-                send_stream_error(&tx, &shutdown, Status::unavailable(error.to_string())).await;
+                send_stream_error(
+                    &tx,
+                    &shutdown,
+                    Status::unavailable(error.to_string()),
+                    operation_timeout,
+                )
+                .await;
                 return;
             },
         }
@@ -488,9 +531,10 @@ async fn send_stream_error(
     >,
     shutdown: &CancellationToken,
     status: Status,
+    operation_timeout: Duration,
 ) {
     tokio::select! {
-        _ = tx.send(Err(status)) => {},
+        _ = tokio::time::timeout(operation_timeout, tx.send(Err(status))) => {},
         () = shutdown.cancelled() => {},
         () = tx.closed() => {},
     }
@@ -681,8 +725,13 @@ mod tests {
         let shutdown = CancellationToken::new();
         let task_shutdown = shutdown.clone();
         let blocked = tokio::spawn(async move {
-            send_stream_error(&tx, &task_shutdown, Status::unavailable("storage unavailable"))
-                .await;
+            send_stream_error(
+                &tx,
+                &task_shutdown,
+                Status::unavailable("storage unavailable"),
+                Duration::from_secs(1),
+            )
+            .await;
         });
 
         shutdown.cancel();

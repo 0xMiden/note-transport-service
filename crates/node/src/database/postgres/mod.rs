@@ -1,16 +1,13 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use chrono::{DateTime, Utc};
 use miden_protocol::note::NoteHeader;
 use miden_protocol::utils::serde::{Deserializable, Serializable};
 use sqlx::postgres::{PgListener, PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
-use tokio::sync::watch;
 
 use super::{
     DatabaseBackend,
     DatabaseError,
+    DatabaseNotifications,
     DatabaseWatch,
     FetchPage,
     StoreResult,
@@ -24,8 +21,7 @@ const CHANGE_CHANNEL: &str = "miden_note_transport_changes";
 
 pub struct PostgresDatabase {
     pool: PgPool,
-    changes: watch::Sender<DatabaseWatch>,
-    listener_ready: Arc<AtomicBool>,
+    notifications: DatabaseNotifications,
     listener: tokio::task::JoinHandle<()>,
     metrics: MetricsDatabase,
 }
@@ -49,18 +45,10 @@ impl PostgresDatabase {
         let mut pg_listener = PgListener::connect(url).await.map_err(connection_error)?;
         pg_listener.listen(CHANGE_CHANNEL).await.map_err(connection_error)?;
         pg_listener.eager_reconnect(false);
-        let (changes, _) = watch::channel(DatabaseWatch::ready());
-        let listener_ready = Arc::new(AtomicBool::new(true));
-        let listener =
-            spawn_listener(url.to_string(), pg_listener, changes.clone(), listener_ready.clone());
+        let notifications = DatabaseNotifications::new();
+        let listener = spawn_listener(url.to_string(), pg_listener, notifications.clone());
 
-        Ok(Self {
-            pool,
-            changes,
-            listener_ready,
-            listener,
-            metrics,
-        })
+        Ok(Self { pool, notifications, listener, metrics })
     }
 
     pub async fn migrate(url: &str) -> Result<(), DatabaseError> {
@@ -154,8 +142,9 @@ impl DatabaseBackend for PostgresDatabase {
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
-        sqlx::query("SELECT pg_notify($1, '')")
+        sqlx::query("SELECT pg_notify($1, $2)")
             .bind(CHANGE_CHANNEL)
+            .bind(note.header.metadata().tag().as_u32().to_string())
             .execute(&mut *tx)
             .await
             .map_err(query_error)?;
@@ -265,12 +254,12 @@ impl DatabaseBackend for PostgresDatabase {
         Ok(seqs.len() as u64)
     }
 
-    fn subscribe(&self) -> watch::Receiver<DatabaseWatch> {
-        self.changes.subscribe()
+    fn subscribe(&self, tag: NoteTag) -> tokio::sync::watch::Receiver<DatabaseWatch> {
+        self.notifications.subscribe(tag)
     }
 
     async fn is_ready(&self) -> bool {
-        self.listener_ready.load(Ordering::Acquire)
+        self.notifications.is_ready()
             && sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&self.pool).await.is_ok()
     }
 }
@@ -278,19 +267,21 @@ impl DatabaseBackend for PostgresDatabase {
 fn spawn_listener(
     url: String,
     mut listener: PgListener,
-    changes: watch::Sender<DatabaseWatch>,
-    ready: Arc<AtomicBool>,
+    notifications: DatabaseNotifications,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match listener.try_recv().await {
-                Ok(Some(_)) => changes.send_modify(DatabaseWatch::advance),
+                Ok(Some(notification)) => match notification.payload().parse::<u32>() {
+                    Ok(tag) => notifications.notify(tag.into()),
+                    Err(error) => tracing::warn!(
+                        %error,
+                        payload = notification.payload(),
+                        "PostgreSQL note notification had an invalid tag"
+                    ),
+                },
                 result => {
-                    ready.store(false, Ordering::Release);
-                    changes.send_modify(|state| {
-                        state.ready = false;
-                        state.advance();
-                    });
+                    notifications.set_ready(false);
                     match result {
                         Ok(None) => {
                             tracing::error!("PostgreSQL note notification listener disconnected");
@@ -308,11 +299,7 @@ fn spawn_listener(
                                 Ok(()) => {
                                     replacement.eager_reconnect(false);
                                     listener = replacement;
-                                    ready.store(true, Ordering::Release);
-                                    changes.send_modify(|state| {
-                                        state.ready = true;
-                                        state.advance();
-                                    });
+                                    notifications.set_ready(true);
                                     break;
                                 },
                                 Err(error) => tracing::warn!(%error, "PostgreSQL LISTEN failed"),
@@ -402,6 +389,7 @@ mod tests {
     use sqlx::postgres::PgConnectOptions;
 
     use super::*;
+    use crate::test_utils::TAG_LOCAL_ANY;
 
     #[tokio::test]
     async fn listener_reports_loss_and_recovery() {
@@ -424,9 +412,9 @@ mod tests {
                 .await
                 .unwrap();
 
-        let (changes, mut receiver) = watch::channel(DatabaseWatch::ready());
-        let ready = Arc::new(AtomicBool::new(true));
-        let task = spawn_listener(url, listener, changes, ready.clone());
+        let notifications = DatabaseNotifications::new();
+        let mut receiver = notifications.subscribe(TAG_LOCAL_ANY.into());
+        let task = spawn_listener(url, listener, notifications.clone());
         let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
             .bind(pid)
             .fetch_one(&pool)
@@ -439,14 +427,14 @@ mod tests {
             .expect("listener loss was not reported")
             .unwrap();
         assert!(!receiver.borrow_and_update().is_ready());
-        assert!(!ready.load(Ordering::Acquire));
+        assert!(!notifications.is_ready());
 
         tokio::time::timeout(std::time::Duration::from_secs(3), receiver.changed())
             .await
             .expect("listener did not reconnect")
             .unwrap();
         assert!(receiver.borrow_and_update().is_ready());
-        assert!(ready.load(Ordering::Acquire));
+        assert!(notifications.is_ready());
         task.abort();
     }
 }

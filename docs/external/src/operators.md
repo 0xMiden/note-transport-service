@@ -63,7 +63,7 @@ miden-note-transport-node cleanup \
 | `--database-url` | required | Existing SQLite path or PostgreSQL URL. It can also come from `MNT_DATABASE_URL`. |
 | `--max-note-size` | `512000` | Maximum envelope size in bytes. It can also come from `MNT_MAX_NOTE_SIZE`. |
 | `--max-requests` | `4096` | Maximum concurrent gRPC requests. It can also come from `MNT_MAX_REQUESTS`. |
-| `--request-timeout` | `4` | Per-request timeout in seconds. Active streaming responses are exempt. It can also come from `MNT_REQUEST_TIMEOUT`. |
+| `--request-timeout` | `4` | Unary request and stream operation timeout in seconds. It can also come from `MNT_REQUEST_TIMEOUT`. |
 | `--max-streams` | `1024` | Maximum live `StreamNotes` requests. A slot remains held until its stream ends. |
 | `--max-storage-bytes` | required | Maximum retained payload bytes. It can also come from `MNT_MAX_STORAGE_BYTES`. |
 

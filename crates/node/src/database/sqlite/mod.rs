@@ -10,6 +10,7 @@ use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use super::{
     DatabaseBackend,
     DatabaseError,
+    DatabaseNotifications,
     DatabaseWatch,
     FetchPage,
     StoreResult,
@@ -22,7 +23,7 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("src/database/sqlite/m
 
 pub struct SqliteDatabase {
     pool: SqlitePool,
-    changes: tokio::sync::watch::Sender<DatabaseWatch>,
+    notifications: DatabaseNotifications,
     metrics: MetricsDatabase,
 }
 
@@ -40,8 +41,11 @@ impl SqliteDatabase {
                 .await
                 .map_err(query_error)?;
         metrics.record_retained_bytes(u64::try_from(retained).unwrap_or(0));
-        let (changes, _) = tokio::sync::watch::channel(DatabaseWatch::ready());
-        Ok(Self { pool, changes, metrics })
+        Ok(Self {
+            pool,
+            notifications: DatabaseNotifications::new(),
+            metrics,
+        })
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -52,8 +56,11 @@ impl SqliteDatabase {
         let pool = open_pool(url, true, true).await?;
         MIGRATOR.run(&pool).await.map_err(migration_error)?;
         finalize_migration(&pool).await?;
-        let (changes, _) = tokio::sync::watch::channel(DatabaseWatch::ready());
-        Ok(Self { pool, changes, metrics })
+        Ok(Self {
+            pool,
+            notifications: DatabaseNotifications::new(),
+            metrics,
+        })
     }
 
     pub async fn migrate(url: &str, allow_in_memory: bool) -> Result<(), DatabaseError> {
@@ -143,7 +150,7 @@ impl DatabaseBackend for SqliteDatabase {
         .map_err(query_error)?;
 
         tx.commit().await.map_err(query_error)?;
-        self.changes.send_modify(DatabaseWatch::advance);
+        self.notifications.notify(note.header.metadata().tag());
         self.metrics
             .record_retained_bytes(u64::try_from(next_retained).unwrap_or(u64::MAX));
         timer.finish("ok");
@@ -249,8 +256,8 @@ impl DatabaseBackend for SqliteDatabase {
         Ok(seqs.len() as u64)
     }
 
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<DatabaseWatch> {
-        self.changes.subscribe()
+    fn subscribe(&self, tag: NoteTag) -> tokio::sync::watch::Receiver<DatabaseWatch> {
+        self.notifications.subscribe(tag)
     }
 
     async fn is_ready(&self) -> bool {

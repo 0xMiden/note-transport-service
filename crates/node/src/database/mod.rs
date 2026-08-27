@@ -2,7 +2,9 @@ mod error;
 mod postgres;
 mod sqlite;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub use self::error::DatabaseError;
 use self::postgres::PostgresDatabase;
@@ -43,8 +45,8 @@ pub(crate) struct DatabaseWatch {
 }
 
 impl DatabaseWatch {
-    const fn ready() -> Self {
-        Self { generation: 0, ready: true }
+    const fn new(ready: bool) -> Self {
+        Self { generation: 0, ready }
     }
 
     fn advance(&mut self) {
@@ -53,6 +55,69 @@ impl DatabaseWatch {
 
     pub(crate) const fn is_ready(self) -> bool {
         self.ready
+    }
+}
+
+#[derive(Clone)]
+struct DatabaseNotifications {
+    inner: Arc<DatabaseNotificationsInner>,
+}
+
+struct DatabaseNotificationsInner {
+    ready: AtomicBool,
+    tags: Mutex<HashMap<NoteTag, tokio::sync::watch::Sender<DatabaseWatch>>>,
+}
+
+impl DatabaseNotifications {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(DatabaseNotificationsInner {
+                ready: AtomicBool::new(true),
+                tags: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    fn subscribe(&self, tag: NoteTag) -> tokio::sync::watch::Receiver<DatabaseWatch> {
+        let mut tags = self.inner.tags.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        tags.retain(|_, sender| sender.receiver_count() > 0);
+        tags.entry(tag)
+            .or_insert_with(|| {
+                tokio::sync::watch::channel(DatabaseWatch::new(
+                    self.inner.ready.load(Ordering::Acquire),
+                ))
+                .0
+            })
+            .subscribe()
+    }
+
+    fn notify(&self, tag: NoteTag) {
+        let mut tags = self.inner.tags.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if tags.get(&tag).is_some_and(|sender| sender.receiver_count() == 0) {
+            tags.remove(&tag);
+        } else if let Some(sender) = tags.get(&tag) {
+            sender.send_modify(DatabaseWatch::advance);
+        }
+    }
+
+    fn set_ready(&self, ready: bool) {
+        self.inner.ready.store(ready, Ordering::Release);
+        let mut tags = self.inner.tags.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        tags.retain(|_, sender| {
+            if sender.receiver_count() == 0 {
+                false
+            } else {
+                sender.send_modify(|state| {
+                    state.ready = ready;
+                    state.advance();
+                });
+                true
+            }
+        });
+    }
+
+    fn is_ready(&self) -> bool {
+        self.inner.ready.load(Ordering::Acquire)
     }
 }
 
@@ -78,7 +143,7 @@ trait DatabaseBackend: Send + Sync {
         max_rows: u32,
     ) -> Result<u64, DatabaseError>;
 
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<DatabaseWatch>;
+    fn subscribe(&self, tag: NoteTag) -> tokio::sync::watch::Receiver<DatabaseWatch>;
 
     async fn is_ready(&self) -> bool;
 }
@@ -183,8 +248,8 @@ impl Database {
     }
 
     /// Subscribe to committed storage changes.
-    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<DatabaseWatch> {
-        self.backend.subscribe()
+    pub(crate) fn subscribe(&self, tag: NoteTag) -> tokio::sync::watch::Receiver<DatabaseWatch> {
+        self.backend.subscribe(tag)
     }
 
     /// Check whether storage can serve requests and deliver commit signals.
@@ -256,13 +321,20 @@ mod tests {
     }
 
     async fn backend_contract(db: &Database) {
-        let mut changes = db.subscribe();
+        let mut changes = db.subscribe(TAG_LOCAL_ANY.into());
+        let mut unrelated = db.subscribe((TAG_LOCAL_ANY + 1).into());
         let first = note(&[1]);
         assert_eq!(db.store_note(&first, u64::MAX).await.unwrap(), StoreResult::Inserted);
         tokio::time::timeout(std::time::Duration::from_secs(1), changes.changed())
             .await
             .expect("the committed note did not notify subscribers")
             .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), unrelated.changed())
+                .await
+                .is_err(),
+            "a write woke a subscriber for another tag"
+        );
         assert_eq!(db.store_note(&first, 0).await.unwrap(), StoreResult::AlreadyPresent);
 
         let mut variant = first.clone();
