@@ -23,6 +23,15 @@ pub enum StoreResult {
     AlreadyPresent,
 }
 
+/// A bounded page of stored notes.
+#[derive(Debug)]
+pub struct FetchPage {
+    /// Notes that fit within the page limits.
+    pub notes: Vec<StoredNote>,
+    /// Whether another request may return more notes.
+    pub has_more: bool,
+}
+
 #[async_trait::async_trait]
 trait DatabaseBackend: Send + Sync {
     async fn store_note(
@@ -37,7 +46,7 @@ trait DatabaseBackend: Send + Sync {
         cursor: u64,
         max_rows: u32,
         max_bytes: usize,
-    ) -> Result<Vec<StoredNote>, DatabaseError>;
+    ) -> Result<FetchPage, DatabaseError>;
 
     async fn cleanup_old_notes(
         &self,
@@ -121,11 +130,7 @@ impl Database {
     }
 
     /// Fetch a bounded page for one tag.
-    pub async fn fetch_notes(
-        &self,
-        tag: NoteTag,
-        cursor: u64,
-    ) -> Result<Vec<StoredNote>, DatabaseError> {
+    pub async fn fetch_notes(&self, tag: NoteTag, cursor: u64) -> Result<FetchPage, DatabaseError> {
         self.fetch_notes_by_tags(&[tag], cursor).await
     }
 
@@ -134,7 +139,7 @@ impl Database {
         &self,
         tags: &[NoteTag],
         cursor: u64,
-    ) -> Result<Vec<StoredNote>, DatabaseError> {
+    ) -> Result<FetchPage, DatabaseError> {
         self.backend
             .fetch_notes_by_tags(tags, cursor, FETCH_NOTES_MAX_ROWS, FETCH_NOTES_MAX_BYTES)
             .await
@@ -220,8 +225,9 @@ mod tests {
         assert_eq!(db.store_note(&variant, u64::MAX).await.unwrap(), StoreResult::Inserted);
 
         let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
-        assert_eq!(fetched.len(), 2);
-        assert!(fetched[0].seq < fetched[1].seq);
+        assert_eq!(fetched.notes.len(), 2);
+        assert!(!fetched.has_more);
+        assert!(fetched.notes[0].seq < fetched.notes[1].seq);
     }
 
     #[tokio::test]
@@ -268,14 +274,45 @@ mod tests {
         db.store_note(&first, u64::MAX).await.unwrap();
         db.store_note(&second, u64::MAX).await.unwrap();
 
+        let one_envelope = first.header.to_bytes().len() + first.details.len();
+
         let fetched = db
             .backend
-            .fetch_notes_by_tags(&[TAG_LOCAL_ANY.into()], 0, 500, 1)
+            .fetch_notes_by_tags(&[TAG_LOCAL_ANY.into()], 0, 500, one_envelope)
             .await
             .unwrap();
-        assert!(fetched.is_empty());
+        assert_eq!(fetched.notes.len(), 1);
+        assert!(fetched.has_more);
         assert_eq!(db.cleanup_old_notes(1, 1).await.unwrap(), 1);
-        assert_eq!(db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap().len(), 1);
+        assert_eq!(db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap().notes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_fetch_reports_more_rows() {
+        let db = sqlite().await;
+        db.store_note(&note(&[1]), u64::MAX).await.unwrap();
+        db.store_note(&note(&[2]), u64::MAX).await.unwrap();
+
+        let first = db
+            .backend
+            .fetch_notes_by_tags(&[TAG_LOCAL_ANY.into()], 0, 1, FETCH_NOTES_MAX_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(first.notes.len(), 1);
+        assert!(first.has_more);
+
+        let second = db
+            .backend
+            .fetch_notes_by_tags(
+                &[TAG_LOCAL_ANY.into()],
+                first.notes[0].seq.try_into().unwrap(),
+                1,
+                FETCH_NOTES_MAX_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.notes.len(), 1);
+        assert!(!second.has_more);
     }
 
     #[tokio::test]

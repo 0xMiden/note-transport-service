@@ -60,6 +60,7 @@ message FetchNotesRequest {
 message FetchNotesResponse {
     repeated TransportNote notes = 1;
     fixed64 cursor = 2;
+    bool has_more = 3;
 }
 ```
 
@@ -69,11 +70,11 @@ Use this flow:
 2. Send all tags the client wants to check, up to 128 tags.
 3. Import or process the returned notes.
 4. Persist the response `cursor`.
-5. Repeat with the stored cursor.
+5. Repeat with the stored cursor while `has_more` is true.
 
 The response cursor is the highest server-side `seq` value returned in that response. A cursor belongs to the exact set of requested tags. Start again at `0` when that set changes.
 
-The server batch size is 500 notes. If a response contains many notes, call `FetchNotes` again with the returned cursor until the response is empty or smaller than the batch size.
+Each response is capped at 500 notes and 3 MiB. Use `has_more` because either limit can end a page.
 
 ## Stream notes
 

@@ -260,14 +260,14 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         // two per-tag queries and get leapfrogged when rcursor advanced past
         // its seq on the next fetch. A single `tag IN (…)` query reads all
         // matching rows in one consistent snapshot.
-        let stored_notes = self
+        let page = self
             .database
             .fetch_notes_by_tags(&tags, cursor)
             .await
             .map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
 
         let mut rcursor = cursor;
-        for stored_note in &stored_notes {
+        for stored_note in &page.notes {
             let seq_cursor: u64 = stored_note
                 .seq
                 .try_into()
@@ -275,7 +275,7 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
             rcursor = rcursor.max(seq_cursor);
         }
 
-        let proto_notes: Vec<_> = stored_notes.into_iter().map(TransportNote::from).collect();
+        let proto_notes: Vec<_> = page.notes.into_iter().map(TransportNote::from).collect();
 
         span.record("notes_returned", proto_notes.len());
         span.record("response_cursor", rcursor);
@@ -288,7 +288,11 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
             proto_notes_size,
         );
 
-        Ok(tonic::Response::new(FetchNotesResponse { notes: proto_notes, cursor: rcursor }))
+        Ok(tonic::Response::new(FetchNotesResponse {
+            notes: proto_notes,
+            cursor: rcursor,
+            has_more: page.has_more,
+        }))
     }
 
     type StreamNotesStream = Sub;
