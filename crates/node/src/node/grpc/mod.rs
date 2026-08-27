@@ -198,19 +198,22 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         request: tonic::Request<SendNoteRequest>,
     ) -> Result<tonic::Response<SendNoteResponse>, tonic::Status> {
         let request_data = request.into_inner();
+        let note_size = request_data
+            .note
+            .as_ref()
+            .map_or(0, |note| note.header.len() + note.details.len());
+        let timer = self.metrics.grpc_send_note_request(note_size as u64);
         let pnote = request_data.note.ok_or_else(|| {
             self.metrics.error("send_note", tonic::Code::InvalidArgument);
+            timer.finish("invalid_argument");
             Status::invalid_argument("Missing note")
         })?;
 
         // `header` + `details` are the stored payload; the cap, the metric, and
         // the span field all use the same number so accept and reject report
         // the same size.
-        let note_size = pnote.header.len() + pnote.details.len();
         let span = tracing::Span::current();
         span.record("note_size", note_size);
-
-        let timer = self.metrics.grpc_send_note_request(note_size as u64);
 
         // Validate note size
         if note_size > self.config.max_note_size {
