@@ -253,8 +253,13 @@ mod tests {
     }
 
     async fn backend_contract(db: &Database) {
+        let mut changes = db.subscribe();
         let first = note(&[1]);
         assert_eq!(db.store_note(&first, u64::MAX).await.unwrap(), StoreResult::Inserted);
+        tokio::time::timeout(std::time::Duration::from_secs(1), changes.changed())
+            .await
+            .expect("the committed note did not notify subscribers")
+            .unwrap();
         assert_eq!(db.store_note(&first, 0).await.unwrap(), StoreResult::AlreadyPresent);
 
         let mut variant = first.clone();

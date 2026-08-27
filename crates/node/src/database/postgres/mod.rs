@@ -394,3 +394,58 @@ fn migration_error(error: sqlx::migrate::MigrateError) -> DatabaseError {
     drop(error);
     DatabaseError::Migration(message)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use sqlx::postgres::PgConnectOptions;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn listener_reports_loss_and_recovery() {
+        let Ok(url) = std::env::var("MNT_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let pool = PgPoolOptions::new().max_connections(2).connect(&url).await.unwrap();
+        let application_name = format!("mnt-listener-test-{}", std::process::id());
+        let options = PgConnectOptions::from_str(&url).unwrap().application_name(&application_name);
+        let listener_pool =
+            PgPoolOptions::new().max_connections(1).connect_with(options).await.unwrap();
+        let mut listener = PgListener::connect_with(&listener_pool).await.unwrap();
+        listener.listen(CHANGE_CHANNEL).await.unwrap();
+        listener.eager_reconnect(false);
+        let pid: i32 =
+            sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE application_name = $1")
+                .bind(&application_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let (changes, mut receiver) = watch::channel(DatabaseWatch::ready());
+        let ready = Arc::new(AtomicBool::new(true));
+        let task = spawn_listener(url, listener, changes, ready.clone());
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(pid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(terminated);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), receiver.changed())
+            .await
+            .expect("listener loss was not reported")
+            .unwrap();
+        assert!(!receiver.borrow_and_update().is_ready());
+        assert!(!ready.load(Ordering::Acquire));
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), receiver.changed())
+            .await
+            .expect("listener did not reconnect")
+            .unwrap();
+        assert!(receiver.borrow_and_update().is_ready());
+        assert!(ready.load(Ordering::Acquire));
+        task.abort();
+    }
+}
