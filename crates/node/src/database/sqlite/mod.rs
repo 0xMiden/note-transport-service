@@ -31,6 +31,43 @@ pub(crate) const FETCH_NOTES_BATCH_SIZE: i64 = 500;
 /// and two orders of magnitude below any microsecond timestamp this decade.
 const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
 
+/// AUTOINCREMENT high-water mark for the `notes` table (`sqlite_sequence.seq`):
+/// the maximum `seq` ever allocated in this DB file's lifetime.
+///
+/// AUTOINCREMENT guarantees this never decreases within a single lifetime — it
+/// survives `DELETE`, `VACUUM` and `cleanup_old_notes` — so a client cursor that
+/// is strictly above it can only have come from a *different* (larger) seq space
+/// that no longer exists, i.e. the backing DB was recreated. See
+/// [`SqliteDatabase::fetch_notes_by_tags`] for how that stranded cursor is reset.
+///
+/// Returns `None` when the high-water can't be determined (no note ever inserted,
+/// or the sequence bookkeeping is unavailable). The caller then SKIPS the
+/// stranded-cursor check entirely, leaving the cursor unchanged — fail-safe, so a
+/// transient unavailability of `sqlite_sequence` can never fail a fetch or falsely
+/// reset a live client.
+fn high_water_seq(conn: &mut SqliteConnection) -> Option<i64> {
+    #[derive(diesel::QueryableByName)]
+    struct HighWater {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        seq: i64,
+    }
+
+    // `sqlite_sequence` is SQLite bookkeeping, not part of the Diesel schema, so
+    // query it with raw SQL. `.optional()` maps "no row for notes yet" (nothing
+    // inserted) to `None`; any other error also degrades to `None` so this check
+    // is purely advisory and can never break a fetch.
+    match diesel::sql_query("SELECT seq FROM sqlite_sequence WHERE name = 'notes'")
+        .get_result::<HighWater>(conn)
+        .optional()
+    {
+        Ok(row) => row.map(|r| r.seq),
+        Err(err) => {
+            tracing::debug!(?err, "sqlite_sequence unreadable; skipping stranded-cursor check");
+            None
+        },
+    }
+}
+
 /// `SQLite` implementation of the database backend
 pub struct SqliteDatabase {
     pool: deadpool_diesel::Pool<ConnectionManager, deadpool::managed::Object<ConnectionManager>>,
@@ -137,7 +174,9 @@ impl DatabaseBackend for SqliteDatabase {
         tag: NoteTag,
         cursor: u64,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
-        self.fetch_notes_by_tags(&[tag], cursor).await
+        // Single-tag convenience: drop the effective cursor (only the gRPC
+        // fetch handler needs it, to base its response cursor on the reset).
+        Ok(self.fetch_notes_by_tags(&[tag], cursor).await?.0)
     }
 
     #[tracing::instrument(skip(self, tags), fields(
@@ -150,28 +189,27 @@ impl DatabaseBackend for SqliteDatabase {
         &self,
         tags: &[NoteTag],
         cursor: u64,
-    ) -> Result<Vec<StoredNote>, DatabaseError> {
+    ) -> Result<(Vec<StoredNote>, u64), DatabaseError> {
         let timer = self.metrics.db_fetch_notes();
 
         // Legacy cursor detection: clients upgraded from the pre-`seq` schema
         // carry microsecond-timestamp cursors; interpret those as 0 so they
         // don't stall forever waiting for `seq` to catch up. Record a metric
         // so operators can see when pre-migration clients are being reset.
-        let effective_cursor = if cursor > LEGACY_CURSOR_THRESHOLD {
+        let legacy_reset = cursor > LEGACY_CURSOR_THRESHOLD;
+        if legacy_reset {
             self.metrics.db_fetch_notes_legacy_cursor_reset();
             tracing::info!(original_cursor = cursor, "Legacy cursor reset to 0");
-            0
-        } else {
-            cursor
-        };
+        }
+        let post_legacy_cursor = if legacy_reset { 0 } else { cursor };
 
-        let cursor_i64: i64 = effective_cursor.try_into().map_err(|_| {
+        let cursor_i64: i64 = post_legacy_cursor.try_into().map_err(|_| {
             DatabaseError::QueryExecution("Cursor too large for SQLite".to_string())
         })?;
 
         if tags.is_empty() {
             timer.finish("ok");
-            return Ok(Vec::new());
+            return Ok((Vec::new(), post_legacy_cursor));
         }
 
         let tag_values: Vec<i64> = tags.iter().map(|t| i64::from(t.as_u32())).collect();
@@ -183,21 +221,64 @@ impl DatabaseBackend for SqliteDatabase {
         //
         // LIMIT caps response size; a backlogged client paginates by re-calling
         // with the returned cursor until the response is smaller than the limit.
-        let notes: Vec<Note> = self
+        //
+        // Stranded-cursor detection runs in the SAME snapshot so the high-water
+        // is consistent with the rows read: a non-zero cursor strictly above the
+        // AUTOINCREMENT high-water can only come from a regressed seq space (the
+        // backing DB was recreated), and — unlike a legacy µs cursor — it is a
+        // plausible small `seq`, so `LEGACY_CURSOR_THRESHOLD` never catches it.
+        // Reset it to 0 so the client re-scans the current epoch; the effective
+        // cursor returned below lets the caller heal the client's stored position
+        // (see the gRPC fetch handler) instead of re-triggering the reset forever.
+        let (notes, effective_i64): (Vec<Note>, i64) = self
             .transact("fetch notes by tags", move |conn| {
                 use schema::notes::dsl::{notes, seq, tag};
+
+                // Only a non-zero cursor can be stranded. This guard also makes
+                // the heal converge: a reset lands the client (and, on the push
+                // path, the stored subscription cursor) at 0, and cursor 0 never
+                // re-enters this branch — so the reset fires at most once per
+                // stranding event, not every poll.
+                let mut effective = cursor_i64;
+                if effective > 0 {
+                    if let Some(high_water) = high_water_seq(conn) {
+                        // Strict `>` is deliberate: a caught-up client sits at
+                        // `cursor == high_water` and must NOT be reset (that would
+                        // re-deliver the whole epoch every steady-state poll). The
+                        // accepted residual edge is that if a recreated epoch grows
+                        // to exactly the stranded cursor before the client's next
+                        // poll, the reset is skipped and the client misses that
+                        // epoch's `1..=cursor` backlog — a one-insert-wide
+                        // coincidence with bounded impact.
+                        if effective > high_water {
+                            effective = 0;
+                        }
+                    }
+                }
+
                 let fetched_notes = notes
                     .filter(tag.eq_any(&tag_values))
-                    .filter(seq.gt(cursor_i64))
+                    .filter(seq.gt(effective))
                     .order(seq.asc())
                     .limit(FETCH_NOTES_BATCH_SIZE)
                     // Name-based column selection (via `Selectable`) so a future
                     // mid-table column insert can't silently misalign fields.
                     .select(Note::as_select())
                     .load(conn)?;
-                Ok(fetched_notes)
+                Ok((fetched_notes, effective))
             })
             .await?;
+
+        // A post-legacy cursor that came back as 0 was reset by the high-water
+        // check above (a legacy reset already zeroed `post_legacy_cursor`, so it
+        // is excluded by the `> 0` guard and never counted here).
+        if post_legacy_cursor > 0 && effective_i64 == 0 {
+            self.metrics.db_fetch_notes_stranded_cursor_reset();
+            tracing::warn!(
+                original_cursor = cursor,
+                "Cursor above seq high-water reset to 0 (server seq space regressed; DB recreated)"
+            );
+        }
 
         let mut stored_notes = Vec::new();
         for note in notes {
@@ -210,7 +291,8 @@ impl DatabaseBackend for SqliteDatabase {
         tracing::Span::current().record("notes_returned", stored_notes.len());
         timer.finish("ok");
 
-        Ok(stored_notes)
+        let effective_cursor: u64 = effective_i64.try_into().unwrap_or(0);
+        Ok((stored_notes, effective_cursor))
     }
 
     async fn get_stats(&self) -> Result<(u64, u64), DatabaseError> {

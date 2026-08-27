@@ -252,13 +252,20 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         // two per-tag queries and get leapfrogged when rcursor advanced past
         // its seq on the next fetch. A single `tag IN (…)` query reads all
         // matching rows in one consistent snapshot.
-        let stored_notes = self
+        let (stored_notes, effective_cursor) = self
             .database
             .fetch_notes_by_tags(&tags, cursor)
             .await
             .map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
 
-        let mut rcursor = cursor;
+        // Base the response cursor on the EFFECTIVE cursor used for the query, not
+        // the client's claimed one. When the claimed cursor was reset (legacy µs
+        // cursor, or stranded above the seq high-water after a DB recreation),
+        // `effective_cursor` is 0, so the echoed cursor becomes the max seq we
+        // actually returned — the client's next poll then starts from the true
+        // epoch position and heals, instead of re-sending its stranded cursor and
+        // re-triggering the reset on every request.
+        let mut rcursor = effective_cursor;
         for stored_note in &stored_notes {
             let seq_cursor: u64 = stored_note
                 .seq
@@ -394,5 +401,82 @@ mod tests {
         let response = result.expect("request at the cap must succeed").into_inner();
         assert_eq!(response.notes.len(), 0, "DB is empty, no notes returned");
         assert_eq!(response.cursor, 0);
+    }
+
+    /// End-to-end heal: a cursor stranded above the seq high-water (but below the
+    /// legacy threshold) must reset AND the echoed response cursor must be the
+    /// recovered seq — not the stranded value echoed back. This is the actual
+    /// client-healing mechanism; the DB-layer tests only prove `effective == 0`,
+    /// so without this a regression reverting `rcursor = effective_cursor` back
+    /// to `= cursor` would pass every other test while silently re-breaking the
+    /// fix (and re-introducing the analogous latent legacy-cursor bug).
+    #[tokio::test]
+    async fn test_fetch_notes_response_cursor_heals_stranded_client() {
+        use chrono::Utc;
+
+        use crate::test_utils::{TAG_LOCAL_ANY, test_note_header};
+        use crate::types::StoredNote;
+
+        let server = test_server().await;
+        server
+            .database
+            .store_note(&StoredNote {
+                header: test_note_header(),
+                details: vec![9],
+                created_at: Utc::now(),
+                seq: 0,
+                after_block_num: None,
+            })
+            .await
+            .unwrap(); // high-water becomes 1
+
+        // Stranded cross-epoch cursor: far above the high-water (1), far below
+        // the 1e12 legacy threshold.
+        let request =
+            tonic::Request::new(FetchNotesRequest { tags: vec![TAG_LOCAL_ANY], cursor: 5_000 });
+        let response = server.fetch_notes(request).await.expect("must succeed").into_inner();
+
+        assert_eq!(response.notes.len(), 1, "stranded cursor must reset to 0 and recover the note");
+        assert_eq!(
+            response.cursor, 1,
+            "response cursor must be the recovered seq (heal), not the stranded 5000 echoed back"
+        );
+    }
+
+    /// Stranded cursor on a tag with NO matching notes in the new epoch: the
+    /// reset still heals the echoed cursor to 0 (so the client re-scans from the
+    /// start next poll) even though no notes come back — the `rcursor` base must
+    /// be the effective cursor (0), not the stranded value.
+    #[tokio::test]
+    async fn test_fetch_notes_response_cursor_heals_when_no_matching_notes() {
+        use chrono::Utc;
+
+        use crate::test_utils::{TAG_LOCAL_ANY, test_note_header_with_tag};
+        use crate::types::StoredNote;
+
+        let server = test_server().await;
+        // A note under a DIFFERENT tag lifts the high-water to 1; the requested
+        // tag has no notes in this epoch.
+        server
+            .database
+            .store_note(&StoredNote {
+                header: test_note_header_with_tag(0xc000_0001),
+                details: vec![7],
+                created_at: Utc::now(),
+                seq: 0,
+                after_block_num: None,
+            })
+            .await
+            .unwrap();
+
+        let request =
+            tonic::Request::new(FetchNotesRequest { tags: vec![TAG_LOCAL_ANY], cursor: 5_000 });
+        let response = server.fetch_notes(request).await.expect("must succeed").into_inner();
+
+        assert_eq!(response.notes.len(), 0, "requested tag has no notes in the new epoch");
+        assert_eq!(
+            response.cursor, 0,
+            "stranded cursor must heal to 0, not echo the stranded 5000 back, even with no notes"
+        );
     }
 }
