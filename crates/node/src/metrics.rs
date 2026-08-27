@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter, UpDownCounter};
 
@@ -277,7 +279,7 @@ fn request_count_measure<'a>(
         operation: operation.to_string(),
         start,
         histogram,
-        finished: false,
+        finished: Cell::new(false),
     }
 }
 
@@ -293,14 +295,14 @@ pub struct RequestTimer<'a> {
     operation: String,
     start: std::time::Instant,
     histogram: &'a Histogram<f64>,
-    finished: bool,
+    finished: Cell<bool>,
 }
 
 impl RequestTimer<'_> {
     /// Finish the request and record the duration
-    pub fn finish(mut self, status: &str) {
+    pub fn finish(&self, status: &str) {
         self.record(status);
-        self.finished = true;
+        self.finished.set(true);
     }
 
     fn record(&self, status: &str) {
@@ -320,7 +322,7 @@ impl RequestTimer<'_> {
 
 impl Drop for RequestTimer<'_> {
     fn drop(&mut self) {
-        if !self.finished {
+        if !self.finished.get() {
             self.record("dropped");
         }
     }

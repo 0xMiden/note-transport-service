@@ -226,10 +226,12 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
             .map_err(|e| {
                 tracing::warn!(reason = "invalid_header", "send_note rejected");
                 self.metrics.error("send_note", tonic::Code::InvalidArgument);
+                timer.finish("invalid_argument");
                 Status::invalid_argument(format!("Invalid header: {e:?}"))
             })?;
         if SealedMessage::read_from_bytes(&pnote.details).is_err() {
             self.metrics.error("send_note", tonic::Code::InvalidArgument);
+            timer.finish("invalid_argument");
             return Err(Status::invalid_argument(
                 "note details are not a valid sealed message",
             ));
@@ -259,10 +261,12 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
                 crate::database::DatabaseError::Capacity(message) => {
                     self.metrics.rejected_write("storage_capacity");
                     self.metrics.error("send_note", tonic::Code::ResourceExhausted);
+                    timer.finish("resource_exhausted");
                     tonic::Status::resource_exhausted(message)
                 },
                 error => {
                     self.metrics.error("send_note", tonic::Code::Unavailable);
+                    timer.finish("unavailable");
                     tonic::Status::unavailable(format!("Failed to store note: {error:?}"))
                 },
             })?;
@@ -329,6 +333,7 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
             .await
             .map_err(|e| {
                 self.metrics.error("fetch_notes", tonic::Code::Unavailable);
+                timer.finish("unavailable");
                 tonic::Status::unavailable(format!("Failed to fetch notes: {e:?}"))
             })?;
 
@@ -339,6 +344,7 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
                 .try_into()
                 .map_err(|_| {
                     self.metrics.error("fetch_notes", tonic::Code::Internal);
+                    timer.finish("internal");
                     tonic::Status::internal("Negative seq in stored note")
                 })?;
             rcursor = rcursor.max(seq_cursor);
