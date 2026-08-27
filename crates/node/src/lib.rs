@@ -13,7 +13,7 @@
 //!
 //! ## Database
 //! Notes are stored through [`Database`](`crate::database::Database`). The storage contract is
-//! private to this crate, and SQLite provides the current implementation.
+//! private to this crate, with SQLite and PostgreSQL implementations.
 //!
 //! Schema migration and retention cleanup are explicit operator commands.
 //!

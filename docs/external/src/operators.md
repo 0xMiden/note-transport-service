@@ -38,8 +38,7 @@ Then start the service:
 
 ```bash
 miden-note-transport-node serve \
-  --host 0.0.0.0 \
-  --port 57292 \
+  --listen 0.0.0.0:57292 \
   --database-url "$MNT_DATABASE_URL" \
   --max-storage-bytes 1073741824
 ```
@@ -59,27 +58,14 @@ miden-note-transport-node cleanup \
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--host` | `127.0.0.1` | Address to bind to. |
-| `--port` | `57292` | gRPC port. |
+| `--listen` | `127.0.0.1:57292` | Address and port to bind to. It can also come from `MNT_LISTEN`. |
 | `--database-url` | required | Existing SQLite path or PostgreSQL URL. It can also come from `MNT_DATABASE_URL`. |
-| `--max-note-size` | `512000` | Maximum envelope size in bytes. |
-| `--max-connections` | `4096` | Maximum concurrent gRPC connections. |
-| `--request-timeout` | `4` | Per-request timeout in seconds. |
+| `--max-note-size` | `512000` | Maximum envelope size in bytes. It can also come from `MNT_MAX_NOTE_SIZE`. |
+| `--max-connections` | `4096` | Maximum concurrent gRPC requests. It can also come from `MNT_MAX_CONNECTIONS`. |
+| `--request-timeout` | `4` | Per-request timeout in seconds. It can also come from `MNT_REQUEST_TIMEOUT`. |
 | `--max-storage-bytes` | required | Maximum retained payload bytes. It can also come from `MNT_MAX_STORAGE_BYTES`. |
 
-The `migrate` command requires `--database-url`. The `cleanup` command also accepts `--retention-days` and `--max-rows`.
-
-## Copy SQLite to PostgreSQL
-
-Stop every process that can write to the SQLite database. Migrate an empty PostgreSQL database, then run:
-
-```bash
-miden-note-transport-node copy \
-  --sqlite /var/lib/miden-note-transport/node.db \
-  --postgres "$MNT_DATABASE_URL"
-```
-
-The destination must be empty. The command keeps each cursor and verifies row counts, envelope digests, retained bytes, and the next cursor before it succeeds. Keep the stopped SQLite file during the rollback window.
+The `migrate` command requires `--database-url`. The `cleanup` command also accepts `--retention-days` and `--max-rows`. Those values can come from `MNT_RETENTION_DAYS` and `MNT_CLEANUP_MAX_ROWS`.
 
 ## Telemetry and logging
 
@@ -99,7 +85,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317 \
 JSON_LOGGING=true \
 RUST_LOG=INFO \
 miden-note-transport-node serve \
-  --host 0.0.0.0 \
+  --listen 0.0.0.0:57292 \
   --database-url /var/lib/miden-note-transport/node.db \
   --max-storage-bytes 1073741824
 ```

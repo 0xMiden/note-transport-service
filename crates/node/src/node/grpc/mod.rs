@@ -27,7 +27,7 @@ use tower::timeout::TimeoutLayer;
 use tower_http::cors::{Any, CorsLayer};
 
 use self::streaming::{NoteStreamer, StreamerMessage, Sub, Subface};
-use crate::database::{Database, normalize_fetch_cursor};
+use crate::database::Database;
 use crate::metrics::MetricsGrpc;
 
 /// Upper bound on the number of tags a client may include in a single
@@ -53,10 +53,8 @@ pub struct GrpcServer {
 /// [`GrpcServer`] configuration
 #[derive(Clone, Debug)]
 pub struct GrpcServerConfig {
-    /// Server host
-    pub host: String,
-    /// Server port
-    pub port: u16,
+    /// Address on which the server listens.
+    pub listen: SocketAddr,
     /// Maximum note size to be stored
     pub max_note_size: usize,
     /// Maximum number of concurrent connections
@@ -76,8 +74,7 @@ pub(super) struct StreamerCtx {
 impl Default for GrpcServerConfig {
     fn default() -> Self {
         Self {
-            host: "127.0.0.1".to_string(),
-            port: 57292,
+            listen: "127.0.0.1:57292".parse().expect("default listen address is valid"),
             max_note_size: 512_000,
             max_connections: 4096,
             request_timeout: 4,
@@ -100,6 +97,7 @@ impl GrpcServer {
 
     /// gRPC server running-task
     pub async fn serve(self) -> crate::Result<()> {
+        let listen = self.config.listen;
         let (health_reporter, health_svc) = tonic_health::server::health_reporter();
         health_reporter.set_serving::<MidenNoteTransportServer<Self>>().await;
 
@@ -110,10 +108,6 @@ impl GrpcServer {
             .map_err(|e| {
                 crate::Error::Internal(format!("Failed to build reflection service: {e}"))
             })?;
-
-        let addr = format!("{}:{}", self.config.host, self.config.port)
-            .parse::<SocketAddr>()
-            .map_err(|e| crate::Error::Internal(format!("Invalid address: {e}")))?;
 
         let cors = CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any);
 
@@ -126,7 +120,7 @@ impl GrpcServer {
             .add_service(health_svc)
             .add_service(reflection_svc)
             .add_service(self.into_service())
-            .serve(addr)
+            .serve(listen)
             .await
             .map_err(|e| crate::Error::Internal(format!("Server error: {e}")))
     }
@@ -255,7 +249,7 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         // and the previous per-tag loop happened to dedupe via BTreeSet.
         let tag_set: BTreeSet<_> = request_data.tags.into_iter().collect();
         let tags: Vec<crate::types::NoteTag> = tag_set.into_iter().map(Into::into).collect();
-        let cursor = normalize_fetch_cursor(request_data.cursor);
+        let cursor = request_data.cursor;
 
         let span = tracing::Span::current();
         span.record("tag_count", tags.len());
@@ -345,17 +339,11 @@ mod tests {
     use super::*;
     use crate::database::Database;
     use crate::metrics::Metrics;
-    use crate::test_utils::{TAG_LOCAL_ANY, test_note_header};
-    use crate::types::StoredNote;
-
-    async fn test_server_with_database() -> (GrpcServer, Arc<Database>) {
-        let metrics = Metrics::default();
-        let db = Arc::new(Database::connect_for_test(metrics.db.clone()).await.unwrap());
-        (GrpcServer::new(db.clone(), GrpcServerConfig::default(), metrics.grpc), db)
-    }
 
     async fn test_server() -> GrpcServer {
-        test_server_with_database().await.0
+        let metrics = Metrics::default();
+        let database = Arc::new(Database::connect_for_test(metrics.db.clone()).await.unwrap());
+        GrpcServer::new(database, GrpcServerConfig::default(), metrics.grpc)
     }
 
     /// A client sending more tags than `MAX_TAGS_PER_FETCH_REQUEST` is rejected
@@ -393,47 +381,5 @@ mod tests {
         let response = result.expect("request at the cap must succeed").into_inner();
         assert_eq!(response.notes.len(), 0, "DB is empty, no notes returned");
         assert_eq!(response.cursor, 0);
-    }
-
-    #[tokio::test]
-    async fn legacy_cursor_advances_across_pages() {
-        let (server, database) = test_server_with_database().await;
-        for _ in 0..=crate::database::FETCH_NOTES_MAX_ROWS {
-            database
-                .store_note(
-                    &StoredNote {
-                        header: test_note_header(),
-                        details: vec![1],
-                        created_at: Utc::now(),
-                        seq: 0,
-                        after_block_num: None,
-                    },
-                    u64::MAX,
-                )
-                .await
-                .unwrap();
-        }
-
-        let first = server
-            .fetch_notes(tonic::Request::new(FetchNotesRequest {
-                tags: vec![TAG_LOCAL_ANY],
-                cursor: crate::database::LEGACY_CURSOR_THRESHOLD + 1,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(first.notes.len(), crate::database::FETCH_NOTES_MAX_ROWS as usize);
-        assert!(first.cursor < crate::database::LEGACY_CURSOR_THRESHOLD);
-
-        let second = server
-            .fetch_notes(tonic::Request::new(FetchNotesRequest {
-                tags: vec![TAG_LOCAL_ANY],
-                cursor: first.cursor,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(second.notes.len(), 1);
-        assert!(second.cursor > first.cursor);
     }
 }

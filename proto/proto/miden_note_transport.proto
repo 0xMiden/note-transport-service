@@ -7,7 +7,8 @@ package miden_note_transport.v1;
 message TransportNote {
     // NoteHeader
     bytes header = 1;
-    // NoteDetails, can be encrypted
+    // NoteDetails sealed by the sender. The service validates the sealed
+    // message framing but does not decrypt it.
     bytes details = 2;
     // Lower bound on the block at which the note's on-chain commitment landed:
     // the recipient scans from this block forward instead of using a default

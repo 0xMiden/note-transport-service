@@ -6,7 +6,8 @@ pub struct TransportNote {
     /// NoteHeader
     #[prost(bytes = "vec", tag = "1")]
     pub header: ::prost::alloc::vec::Vec<u8>,
-    /// NoteDetails, can be encrypted
+    /// NoteDetails sealed by the sender. The service validates the sealed
+    /// message framing but does not decrypt it.
     #[prost(bytes = "vec", tag = "2")]
     pub details: ::prost::alloc::vec::Vec<u8>,
     /// Lower bound on the block at which the note's on-chain commitment landed:
