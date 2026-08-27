@@ -1,9 +1,8 @@
 # Miden Note Transport Layer
 
-<!--`TODO(template) update badges`-->
-[![LICENSE](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/0xMiden/project-template/blob/main/LICENSE)
-[![test](https://github.com/0xMiden/project-template/actions/workflows/test.yml/badge.svg)](https://github.com/0xMiden/project-template/actions/workflows/test.yml)
-[![RUST_VERSION](https://img.shields.io/badge/rustc-1.89+-lightgray.svg)](https://www.rust-lang.org/tools/install)
+[![LICENSE](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/0xMiden/note-transport-service/blob/main/LICENSE)
+[![test](https://github.com/0xMiden/note-transport-service/actions/workflows/test.yml/badge.svg)](https://github.com/0xMiden/note-transport-service/actions/workflows/test.yml)
+[![RUST_VERSION](https://img.shields.io/badge/rustc-1.96.1+-lightgray.svg)](https://www.rust-lang.org/tools/install)
 
 ## Overview
 
