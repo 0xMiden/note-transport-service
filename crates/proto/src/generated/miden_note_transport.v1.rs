@@ -51,6 +51,9 @@ pub struct FetchNotesResponse {
     /// Transport Layer pagination
     #[prost(fixed64, tag = "2")]
     pub cursor: u64,
+    /// True when another request may return more notes.
+    #[prost(bool, tag = "3")]
+    pub has_more: bool,
 }
 /// API request for streaming notes
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

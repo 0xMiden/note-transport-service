@@ -4,7 +4,7 @@ use miden_protocol::utils::serde::{Deserializable, Serializable};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
-use super::{DatabaseBackend, DatabaseError, StoreResult, envelope_digest};
+use super::{DatabaseBackend, DatabaseError, FetchPage, StoreResult, envelope_digest};
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteTag, StoredNote};
 
@@ -132,11 +132,11 @@ impl DatabaseBackend for PostgresDatabase {
         cursor: u64,
         max_rows: u32,
         max_bytes: usize,
-    ) -> Result<Vec<StoredNote>, DatabaseError> {
+    ) -> Result<FetchPage, DatabaseError> {
         let timer = self.metrics.db_fetch_notes();
         if tags.is_empty() {
             timer.finish("ok");
-            return Ok(Vec::new());
+            return Ok(FetchPage { notes: Vec::new(), has_more: false });
         }
         let cursor = i64::try_from(cursor).map_err(|_| {
             DatabaseError::QueryExecution("cursor exceeds PostgreSQL range".to_string())
@@ -144,10 +144,13 @@ impl DatabaseBackend for PostgresDatabase {
         let max_bytes = i64::try_from(max_bytes)
             .map_err(|_| DatabaseError::QueryExecution("byte limit is too large".to_string()))?;
 
+        let candidate_limit = i64::from(max_rows) + 1;
         let mut query = QueryBuilder::<Postgres>::new(
-            "SELECT seq, header, details, created_at, after_block_num FROM (\
+            "SELECT seq, header, details, created_at, after_block_num, candidate_count FROM (\
              SELECT seq, header, details, created_at, after_block_num, \
-             SUM(OCTET_LENGTH(header) + OCTET_LENGTH(details)) OVER (ORDER BY seq) AS running_bytes \
+             SUM(OCTET_LENGTH(header) + OCTET_LENGTH(details)) OVER (ORDER BY seq) AS running_bytes, \
+             COUNT(*) OVER () AS candidate_count FROM (\
+             SELECT seq, header, details, created_at, after_block_num \
              FROM notes WHERE seq > ",
         );
         query.push_bind(cursor).push(" AND tag IN (");
@@ -155,16 +158,23 @@ impl DatabaseBackend for PostgresDatabase {
         for tag in tags {
             separated.push_bind(i64::from(tag.as_u32()));
         }
-        separated.push_unseparated(") ");
+        separated.push_unseparated(") ORDER BY seq LIMIT ");
         query
-            .push("ORDER BY seq) AS bounded WHERE running_bytes <= ")
+            .push_bind(candidate_limit)
+            .push(") AS candidates) AS bounded WHERE running_bytes <= ")
             .push_bind(max_bytes)
             .push(" ORDER BY seq LIMIT ")
             .push_bind(i64::from(max_rows));
         let rows = query.build().fetch_all(&self.pool).await.map_err(query_error)?;
-        let notes = rows.iter().map(row_to_note).collect();
+        let candidate_count = rows
+            .first()
+            .map_or(Ok(0_i64), |row| row.try_get("candidate_count"))
+            .map_err(query_error)?;
+        let notes: Result<Vec<_>, _> = rows.iter().map(row_to_note).collect();
+        let notes = notes?;
+        let has_more = candidate_count > i64::try_from(notes.len()).unwrap_or(i64::MAX);
         timer.finish("ok");
-        notes
+        Ok(FetchPage { notes, has_more })
     }
 
     async fn cleanup_old_notes(

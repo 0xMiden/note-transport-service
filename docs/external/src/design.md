@@ -43,10 +43,11 @@ message FetchNotesRequest {
 message FetchNotesResponse {
     repeated TransportNote notes = 1;
     fixed64 cursor = 2;
+    bool has_more = 3;
 }
 ```
 
-The server returns notes matching any requested tag with `seq > cursor`, ordered by ascending `seq`, up to the server batch size. The response cursor is the highest `seq` returned. A client should persist that value and send it on the next request.
+The server returns notes matching any requested tag with `seq > cursor`, ordered by ascending `seq`, up to the server row and byte limits. The response cursor is the highest `seq` returned. A client should persist that value and send it on the next request while `has_more` is true.
 
 Current limits:
 

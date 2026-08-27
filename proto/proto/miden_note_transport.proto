@@ -45,6 +45,8 @@ message FetchNotesResponse {
     repeated TransportNote notes = 1;
     // Transport Layer pagination
     fixed64 cursor = 2;
+    // True when another request may return more notes.
+    bool has_more = 3;
 }
 
 // API request for streaming notes
