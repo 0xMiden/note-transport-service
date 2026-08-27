@@ -54,8 +54,8 @@ struct ServeArgs {
     #[arg(long, env = "MNT_MAX_NOTE_SIZE", default_value = "512000")]
     max_note_size: usize,
 
-    #[arg(long, env = "MNT_MAX_CONNECTIONS", default_value = "4096")]
-    max_connections: usize,
+    #[arg(long, env = "MNT_MAX_REQUESTS", default_value = "4096")]
+    max_requests: usize,
 
     #[arg(long, env = "MNT_REQUEST_TIMEOUT", default_value = "4")]
     request_timeout: usize,
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
                 grpc: GrpcServerConfig {
                     listen: args.listen,
                     max_note_size: args.max_note_size,
-                    max_connections: args.max_connections,
+                    max_requests: args.max_requests,
                     request_timeout: args.request_timeout,
                     max_storage_bytes: args.max_storage_bytes,
                     max_streams: args.max_streams,

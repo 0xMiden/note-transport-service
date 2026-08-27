@@ -29,11 +29,12 @@ miden-protocol = { features = ["testing"], workspace = true }
 
 # gRPC server and client
 tokio            = { workspace = true }
+tokio-util       = { workspace = true }
 tonic            = { default-features = true, workspace = true }
 tonic-health     = { workspace = true }
 tonic-reflection = { workspace = true }
 tonic-web        = { workspace = true }
-tower            = { features = ["timeout"], workspace = true }
+tower            = { workspace = true }
 tower-http       = { features = ["cors"], workspace = true }
 
 # Database

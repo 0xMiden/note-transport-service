@@ -44,10 +44,8 @@ impl Node {
                 "max storage bytes must be at least the maximum note size".to_string(),
             ));
         }
-        if config.grpc.max_connections == 0 || config.grpc.max_connections > u32::MAX as usize {
-            return Err(crate::Error::Internal(
-                "max connections must be nonzero and fit the HTTP/2 stream limit".to_string(),
-            ));
+        if config.grpc.max_requests == 0 {
+            return Err(crate::Error::Internal("max requests must be nonzero".to_string()));
         }
         if config.grpc.max_streams == 0 {
             return Err(crate::Error::Internal("max streams must be nonzero".to_string()));

@@ -62,7 +62,7 @@ miden-note-transport-node cleanup \
 | `--listen` | `127.0.0.1:57292` | Address and port to bind to. It can also come from `MNT_LISTEN`. |
 | `--database-url` | required | Existing SQLite path or PostgreSQL URL. It can also come from `MNT_DATABASE_URL`. |
 | `--max-note-size` | `512000` | Maximum envelope size in bytes. It can also come from `MNT_MAX_NOTE_SIZE`. |
-| `--max-connections` | `4096` | Maximum concurrent requests and HTTP/2 streams per connection. It can also come from `MNT_MAX_CONNECTIONS`. |
+| `--max-requests` | `4096` | Maximum concurrent gRPC requests. It can also come from `MNT_MAX_REQUESTS`. |
 | `--request-timeout` | `4` | Per-request timeout in seconds. Active streaming responses are exempt. It can also come from `MNT_REQUEST_TIMEOUT`. |
 | `--max-streams` | `1024` | Maximum live `StreamNotes` requests. A slot remains held until its stream ends. |
 | `--max-storage-bytes` | required | Maximum retained payload bytes. It can also come from `MNT_MAX_STORAGE_BYTES`. |
@@ -120,7 +120,7 @@ The gRPC server exposes the note transport API and the health service on port `5
 
 The empty gRPC health service name reports process liveness. The `miden_note_transport.v1.MidenNoteTransport` service reports readiness. Readiness requires a working database query and, for PostgreSQL, a working change-notification listener.
 
-On SIGTERM or Ctrl-C, the server stops accepting new requests and closes active note streams. Bounded unary requests may finish before the configured request timeout. The process closes any remaining health, reflection, or application connection one second after that timeout. Startup and serving failures produce a nonzero exit status. Telemetry providers flush during normal shutdown.
+On SIGTERM or Ctrl-C, the server marks the API unavailable, stops accepting new requests, and closes active note streams. Startup and serving failures produce a nonzero exit status. Telemetry providers flush during normal shutdown.
 
 ## Database behavior
 
