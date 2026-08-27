@@ -7,7 +7,7 @@ use miden_protocol::utils::serde::{Deserializable, Serializable};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
-use super::{DatabaseBackend, DatabaseError, StorageMetadata, StoreResult, envelope_digest};
+use super::{DatabaseBackend, DatabaseError, StoreResult, envelope_digest};
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteTag, StoredNote};
 
@@ -50,38 +50,6 @@ impl SqliteDatabase {
         let pool = open_pool(url, allow_in_memory, true).await?;
         MIGRATOR.run(&pool).await.map_err(migration_error)?;
         finalize_migration(&pool).await
-    }
-
-    pub async fn copy_metadata(&self) -> Result<StorageMetadata, DatabaseError> {
-        let row = sqlx::query(
-            "SELECT (SELECT COUNT(*) FROM notes) AS row_count, next_cursor, retained_bytes \
-             FROM storage_metadata WHERE singleton = 1",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(query_error)?;
-        Ok(StorageMetadata {
-            row_count: row.try_get("row_count").map_err(query_error)?,
-            next_cursor: row.try_get("next_cursor").map_err(query_error)?,
-            retained_bytes: row.try_get("retained_bytes").map_err(query_error)?,
-        })
-    }
-
-    pub async fn export_batch(&self, cursor: i64) -> Result<Vec<StoredNote>, DatabaseError> {
-        let rows = sqlx::query(
-            "SELECT seq, header, details, created_at, after_block_num FROM (\
-             SELECT seq, header, details, created_at, after_block_num, \
-             SUM(LENGTH(header) + LENGTH(details)) OVER (ORDER BY seq) AS running_bytes \
-             FROM notes WHERE seq > ? ORDER BY seq) \
-             WHERE running_bytes <= ? ORDER BY seq LIMIT ?",
-        )
-        .bind(cursor)
-        .bind(i64::try_from(super::FETCH_NOTES_MAX_BYTES).unwrap_or(i64::MAX))
-        .bind(i64::from(super::FETCH_NOTES_MAX_ROWS))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(query_error)?;
-        rows.iter().map(row_to_note).collect()
     }
 }
 

@@ -13,11 +13,6 @@ use crate::types::{NoteTag, StoredNote};
 pub(crate) const FETCH_NOTES_MAX_ROWS: u32 = 500;
 /// Hard upper bound for one stored envelope and one fetched page.
 pub const FETCH_NOTES_MAX_BYTES: usize = 3 * 1024 * 1024;
-pub(crate) const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
-
-pub(crate) fn normalize_fetch_cursor(cursor: u64) -> u64 {
-    if cursor > LEGACY_CURSOR_THRESHOLD { 0 } else { cursor }
-}
 
 /// Result of storing an opaque note envelope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,12 +21,6 @@ pub enum StoreResult {
     Inserted,
     /// An identical envelope was already present.
     AlreadyPresent,
-}
-
-struct StorageMetadata {
-    row_count: i64,
-    next_cursor: i64,
-    retained_bytes: i64,
 }
 
 #[async_trait::async_trait]
@@ -114,23 +103,6 @@ impl Database {
         }
     }
 
-    /// Copy a stopped SQLite database into an empty PostgreSQL database.
-    pub async fn copy_sqlite_to_postgres(
-        sqlite: &DatabaseConfig,
-        postgres: &DatabaseConfig,
-        metrics: MetricsDatabase,
-    ) -> Result<u64, DatabaseError> {
-        if sqlite.is_postgres() || !postgres.is_postgres() {
-            return Err(DatabaseError::Configuration(
-                "copy requires a SQLite source and PostgreSQL destination".to_string(),
-            ));
-        }
-        let source = SqliteDatabase::connect(&sqlite.url, false, metrics.clone()).await?;
-        let metadata = source.copy_metadata().await?;
-        let destination = PostgresDatabase::connect(&postgres.url, metrics).await?;
-        destination.import_from_sqlite(&source, &metadata).await
-    }
-
     #[cfg(any(test, feature = "testing"))]
     /// Create and migrate an isolated in-memory SQLite backend for tests.
     pub async fn connect_for_test(metrics: MetricsDatabase) -> Result<Self, DatabaseError> {
@@ -164,12 +136,7 @@ impl Database {
         cursor: u64,
     ) -> Result<Vec<StoredNote>, DatabaseError> {
         self.backend
-            .fetch_notes_by_tags(
-                tags,
-                normalize_fetch_cursor(cursor),
-                FETCH_NOTES_MAX_ROWS,
-                FETCH_NOTES_MAX_BYTES,
-            )
+            .fetch_notes_by_tags(tags, cursor, FETCH_NOTES_MAX_ROWS, FETCH_NOTES_MAX_BYTES)
             .await
     }
 
@@ -255,9 +222,6 @@ mod tests {
         let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
         assert_eq!(fetched.len(), 2);
         assert!(fetched[0].seq < fetched[1].seq);
-
-        let legacy_cursor = LEGACY_CURSOR_THRESHOLD + 1;
-        assert_eq!(db.fetch_notes(TAG_LOCAL_ANY.into(), legacy_cursor).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -266,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_backend_and_sqlite_copy_contract() {
+    async fn postgres_backend_contract() {
         let Ok(url) = std::env::var("MNT_TEST_POSTGRES_URL") else {
             return;
         };
@@ -274,70 +238,6 @@ mod tests {
         Database::migrate(&config).await.unwrap();
         reset_postgres(&url).await;
 
-        let sqlite_file = tempfile::NamedTempFile::new().unwrap();
-        let sqlite_url = sqlite_file.path().to_string_lossy().into_owned();
-        let sqlite_config = DatabaseConfig::new(&sqlite_url);
-        Database::migrate(&sqlite_config).await.unwrap();
-        let sqlite = Database::connect(sqlite_config.clone(), Metrics::default().db).await.unwrap();
-        sqlite.store_note(&note(&[1]), u64::MAX).await.unwrap();
-        sqlite.store_note(&note(&[2]), u64::MAX).await.unwrap();
-
-        let copied =
-            Database::copy_sqlite_to_postgres(&sqlite_config, &config, Metrics::default().db)
-                .await
-                .unwrap();
-        assert_eq!(copied, 2);
-        let postgres = Database::connect(config.clone(), Metrics::default().db).await.unwrap();
-        assert_eq!(postgres.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap().len(), 2);
-
-        drop(postgres);
-        reset_postgres(&url).await;
-        sqlite.cleanup_old_notes(0, 2).await.unwrap();
-        assert_eq!(
-            Database::copy_sqlite_to_postgres(&sqlite_config, &config, Metrics::default().db)
-                .await
-                .unwrap(),
-            0
-        );
-        let postgres = Database::connect(config.clone(), Metrics::default().db).await.unwrap();
-        postgres.store_note(&note(&[3]), u64::MAX).await.unwrap();
-        let fetched = postgres.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
-        assert_eq!(fetched[0].seq, 3);
-
-        drop(postgres);
-        reset_postgres(&url).await;
-
-        let batched_file = tempfile::NamedTempFile::new().unwrap();
-        let batched_url = batched_file.path().to_string_lossy().into_owned();
-        let batched_config = DatabaseConfig::new(&batched_url);
-        Database::migrate(&batched_config).await.unwrap();
-        let batched_sqlite =
-            Database::connect(batched_config.clone(), Metrics::default().db).await.unwrap();
-        let mut expected = Vec::new();
-        for value in 0..=FETCH_NOTES_MAX_ROWS {
-            let envelope = note(&value.to_le_bytes());
-            batched_sqlite.store_note(&envelope, u64::MAX).await.unwrap();
-            expected.push(envelope);
-        }
-        assert_eq!(
-            Database::copy_sqlite_to_postgres(&batched_config, &config, Metrics::default().db)
-                .await
-                .unwrap(),
-            u64::from(FETCH_NOTES_MAX_ROWS) + 1
-        );
-        let postgres = Database::connect(config.clone(), Metrics::default().db).await.unwrap();
-        let mut copied = postgres.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
-        assert_eq!(copied.len(), FETCH_NOTES_MAX_ROWS as usize);
-        let cursor = u64::try_from(copied.last().unwrap().seq).unwrap();
-        copied.extend(postgres.fetch_notes(TAG_LOCAL_ANY.into(), cursor).await.unwrap());
-        assert_eq!(copied.len(), expected.len());
-        for (index, (actual, source)) in copied.iter().zip(expected).enumerate() {
-            assert_eq!(actual.seq, i64::try_from(index).unwrap() + 1);
-            assert_eq!(actual.details, source.details);
-        }
-
-        drop(postgres);
-        reset_postgres(&url).await;
         let postgres = Database::connect(config, Metrics::default().db).await.unwrap();
         backend_contract(&postgres).await;
         let mut expired = note(&[4]);

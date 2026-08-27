@@ -13,7 +13,7 @@ services:
       dockerfile: bin/node/docker/Dockerfile
     ports:
       - "57292:57292"  # gRPC
-    command: ["miden-note-transport-node", "serve", "--host", "0.0.0.0", "--database-url", "/app/data/node.db", "--max-storage-bytes", "1073741824"]
+    command: ["serve", "--listen", "0.0.0.0:57292", "--database-url", "/app/data/node.db", "--max-storage-bytes", "1073741824"]
     depends_on:
       migrate:
         condition: service_completed_successfully

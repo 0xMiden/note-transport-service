@@ -11,7 +11,7 @@ The note transport node is intentionally small: it accepts note bytes, indexes t
 
 1. A sender creates a private note in a Miden transaction.
 2. After the note data is available locally, the sender calls `SendNote` with a serialized note header and note details.
-3. The transport node parses the header, extracts the note ID and tag, and stores the header and details in SQLite.
+3. The transport node parses the header, extracts the note ID and tag, and stores the envelope.
 4. A recipient calls `FetchNotes` for one or more tags and receives matching notes with a cursor.
 5. The recipient stores the returned cursor and uses it on the next fetch.
 
@@ -26,9 +26,9 @@ The transport node stores:
 - serialized header bytes;
 - serialized details bytes;
 - creation timestamp;
-- `seq`, a monotonic SQLite `AUTOINCREMENT` value.
+- `seq`, a monotonic value assigned by the database.
 
-The note ID column is unique. Re-sending the same note ID is rejected by the database instead of creating a duplicate row.
+The full envelope digest is unique. Sending the same bytes again succeeds without adding a row. A different sealed envelope may contain the same note ID, so clients must deduplicate imported notes by note ID.
 
 ## Cursor pagination
 
@@ -56,12 +56,6 @@ Current limits:
 
 The multi-tag query runs in one database snapshot. This avoids a race where separate per-tag queries could advance the cursor past a note inserted between queries.
 
-## Legacy cursor handling
-
-Earlier designs used timestamp cursors. Existing clients may have stored timestamp-sized cursor values. The node treats cursor values above `1_000_000_000_000` as legacy timestamp cursors and resets the effective query cursor to `0`.
-
-This lets upgraded clients recover instead of waiting for `seq` to reach an old timestamp-sized value.
-
 ## Streaming
 
 `StreamNotes` opens a server-side stream for one tag:
@@ -84,15 +78,13 @@ The current server implementation does not use the request cursor to initialize 
 
 ## Storage and retention
 
-The node uses SQLite with explicit schema migration. The serving process checks migration versions and checksums without changing the schema. In-memory databases are reserved for tests.
+The node supports SQLite and PostgreSQL with explicit schema migration. The serving process checks migration versions and checksums without changing the schema. In-memory SQLite is reserved for tests.
 
 Storage tracks retained payload bytes and rejects writes above the configured limit. Fetches have row and byte limits. Operators remove one bounded batch of expired notes with the cleanup command.
 
 ## Block context
 
-The current protobuf API does not include commitment block number, note metadata, or inclusion proof fields. The transport node stores only `header` and `details`.
-
-This means the node cannot tell a client which block committed a fetched note. Clients must reconcile fetched notes with chain state themselves. The client-side lookback workaround and the proposed transport-level block context are tracked separately in [0xMiden/note-transport-service#68](https://github.com/0xMiden/note-transport-service/issues/68).
+The optional `after_block_num` field gives the client a lower bound for its chain scan. The sender supplies this hint, and the service stores it without checking chain state. Clients must still reconcile fetched notes with the Miden network.
 
 ## What the node does not do
 
