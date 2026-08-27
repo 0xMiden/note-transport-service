@@ -861,7 +861,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1089,9 +1089,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -1918,7 +1918,7 @@ dependencies = [
 
 [[package]]
 name = "miden-note-transport-node"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1951,7 +1951,7 @@ dependencies = [
 
 [[package]]
 name = "miden-note-transport-node-bin"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "clap",
  "miden-note-transport-node",
@@ -1961,7 +1961,7 @@ dependencies = [
 
 [[package]]
 name = "miden-note-transport-proto"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "fs-err",
  "miden-note-transport-proto-build",
@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "miden-note-transport-proto-build"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "fs-err",
  "miette",
@@ -3288,7 +3288,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3757,7 +3757,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4466,7 +4466,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
