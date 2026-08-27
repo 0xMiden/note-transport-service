@@ -100,6 +100,18 @@ impl DatabaseNotifications {
         }
     }
 
+    fn notify_all(&self) {
+        let mut tags = self.inner.tags.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        tags.retain(|_, sender| {
+            if sender.receiver_count() == 0 {
+                false
+            } else {
+                sender.send_modify(DatabaseWatch::advance);
+                true
+            }
+        });
+    }
+
     fn set_ready(&self, ready: bool) {
         self.inner.ready.store(ready, Ordering::Release);
         let mut tags = self.inner.tags.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

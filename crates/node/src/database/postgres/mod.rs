@@ -272,13 +272,20 @@ fn spawn_listener(
     tokio::spawn(async move {
         loop {
             match listener.try_recv().await {
-                Ok(Some(notification)) => match notification.payload().parse::<u32>() {
-                    Ok(tag) => notifications.notify(tag.into()),
-                    Err(error) => tracing::warn!(
-                        %error,
-                        payload = notification.payload(),
-                        "PostgreSQL note notification had an invalid tag"
-                    ),
+                Ok(Some(notification)) => {
+                    let payload = notification.payload();
+                    if payload.is_empty() {
+                        notifications.notify_all();
+                    } else {
+                        match payload.parse::<u32>() {
+                            Ok(tag) => notifications.notify(tag.into()),
+                            Err(error) => tracing::warn!(
+                                %error,
+                                payload,
+                                "PostgreSQL note notification had an invalid tag"
+                            ),
+                        }
+                    }
                 },
                 result => {
                     notifications.set_ready(false);
