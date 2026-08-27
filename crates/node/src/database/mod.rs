@@ -14,6 +14,9 @@ pub(crate) const FETCH_NOTES_MAX_ROWS: u32 = 500;
 /// Hard upper bound for one stored envelope and one fetched page.
 pub const FETCH_NOTES_MAX_BYTES: usize = 3 * 1024 * 1024;
 
+#[cfg(test)]
+pub(crate) static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Result of storing an opaque note envelope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreResult {
@@ -288,6 +291,7 @@ mod tests {
         let Ok(url) = std::env::var("MNT_TEST_POSTGRES_URL") else {
             return;
         };
+        let _guard = POSTGRES_TEST_LOCK.lock().await;
         let config = DatabaseConfig::new(&url);
         Database::migrate(&config).await.unwrap();
         reset_postgres(&url).await;

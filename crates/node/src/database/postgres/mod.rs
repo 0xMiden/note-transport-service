@@ -408,6 +408,7 @@ mod tests {
         let Ok(url) = std::env::var("MNT_TEST_POSTGRES_URL") else {
             return;
         };
+        let _guard = super::super::POSTGRES_TEST_LOCK.lock().await;
         let pool = PgPoolOptions::new().max_connections(2).connect(&url).await.unwrap();
         let application_name = format!("mnt-listener-test-{}", std::process::id());
         let options = PgConnectOptions::from_str(&url).unwrap().application_name(&application_name);
