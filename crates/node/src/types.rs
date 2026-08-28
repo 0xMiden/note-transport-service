@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use miden_note_transport_proto::miden_note_transport::TransportNote;
+use miden_note_transport_proto::miden_note_transport::v1::TransportNote;
 pub use miden_protocol::Felt;
 pub use miden_protocol::account::AccountId;
 pub use miden_protocol::block::BlockNumber;
@@ -19,9 +19,7 @@ use miden_protocol::utils::serde::Serializable;
 pub struct StoredNote {
     /// Note header
     pub header: NoteHeader,
-    /// Note details
-    ///
-    /// Can be encrypted.
+    /// Serialized plaintext note details.
     pub details: Vec<u8>,
     /// Reference timestamp
     pub created_at: DateTime<Utc>,
@@ -43,17 +41,4 @@ impl From<StoredNote> for TransportNote {
             after_block_num: snote.after_block_num,
         }
     }
-}
-
-/// Helper converter from [`prost_types::Timestamp`] to `DateTime<Utc>`
-pub fn proto_timestamp_to_datetime(pts: prost_types::Timestamp) -> anyhow::Result<DateTime<Utc>> {
-    let dts = DateTime::from_timestamp(
-        pts.seconds,
-        pts.nanos
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Negative timestamp nanoseconds".to_string()))?,
-    )
-    .ok_or_else(|| anyhow::anyhow!("Invalid timestamp".to_string()))?;
-
-    Ok(dts)
 }

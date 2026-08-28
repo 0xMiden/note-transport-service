@@ -19,35 +19,53 @@ This installs the `miden-note-transport-node` binary.
 
 ## Run the node
 
-The default configuration binds to localhost and stores notes in an in-memory SQLite database:
+Set the database URL. Production deployments use PostgreSQL:
 
 ```bash
-miden-note-transport-node
+export MNT_DATABASE_URL='postgres://user:password@database/note_transport'
 ```
 
-For a reachable node with persistent storage:
+SQLite remains supported for local deployments. Its database URL is a file path such as `/var/lib/miden-note-transport/node.db`.
+
+Create or update the database before starting the service:
 
 ```bash
-miden-note-transport-node \
-  --host 0.0.0.0 \
-  --port 57292 \
-  --database-url /var/lib/miden-note-transport/node.db \
-  --retention-days 30
+miden-note-transport-node migrate \
+  --database-url "$MNT_DATABASE_URL"
 ```
 
-## CLI flags
+Then start the service:
+
+```bash
+miden-note-transport-node serve \
+  --listen 0.0.0.0:57292 \
+  --database-url "$MNT_DATABASE_URL" \
+  --max-storage-bytes 1073741824
+```
+
+The service checks the migration version and checksum at startup. It does not apply migrations.
+
+Run bounded retention cleanup as a separate operation:
+
+```bash
+miden-note-transport-node cleanup \
+  --database-url "$MNT_DATABASE_URL" \
+  --retention-days 30 \
+  --max-rows 1000
+```
+
+## Serve flags
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--host` | `127.0.0.1` | Address to bind to. |
-| `--port` | `57292` | gRPC port. |
-| `--database-url` | `:memory:` | SQLite database URL or file path. Use a file path for persistence. |
-| `--retention-days` | `30` | How long to retain notes before cleanup. |
-| `--max-note-size` | `512000` | Maximum note details size in bytes. |
-| `--max-connections` | `4096` | Maximum concurrent gRPC connections. |
-| `--request-timeout` | `4` | Per-request timeout in seconds. |
+| `--listen` | `127.0.0.1:57292` | Address and port to bind to. It can also come from `MNT_LISTEN`. |
+| `--database-url` | required | Existing SQLite path or PostgreSQL URL. It can also come from `MNT_DATABASE_URL`. |
+| `--max-note-size` | `512000` | Maximum envelope size in bytes. It can also come from `MNT_MAX_NOTE_SIZE`. |
+| `--max-connections` | `4096` | Maximum concurrent gRPC requests. It can also come from `MNT_MAX_CONNECTIONS`. |
+| `--request-timeout` | `4` | Per-request timeout in seconds. It can also come from `MNT_REQUEST_TIMEOUT`. |
+| `--max-storage-bytes` | required | Maximum retained payload bytes. It can also come from `MNT_MAX_STORAGE_BYTES`. |
 
-The CLI flags above are parsed as command-line arguments. They are not currently read from `DATABASE_URL` or similarly named environment variables.
+The `migrate` command requires `--database-url`. The `cleanup` command also accepts `--retention-days` and `--max-rows`. Those values can come from `MNT_RETENTION_DAYS` and `MNT_CLEANUP_MAX_ROWS`.
 
 ## Telemetry and logging
 
@@ -55,36 +73,30 @@ Telemetry is configured through environment variables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `OTEL_ENABLED` | `false` | Enables OpenTelemetry export when set to `true`. |
-| `OTEL_TRACES_ENDPOINT` | `http://localhost:4317` | OTLP endpoint for trace and metric export. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | OTLP endpoint for trace and metric export. Setting it enables export. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Shared OTLP endpoint that takes precedence when both endpoint variables are set. |
 | `JSON_LOGGING` | `false` | Emits JSON logs when set to `true`. |
 | `RUST_LOG` | `INFO` | Standard Rust tracing filter. |
 
 Example:
 
 ```bash
-OTEL_ENABLED=true \
-OTEL_TRACES_ENDPOINT=http://otel-collector:4317 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317 \
 JSON_LOGGING=true \
 RUST_LOG=INFO \
-miden-note-transport-node --host 0.0.0.0 --database-url /var/lib/miden-note-transport/node.db
+miden-note-transport-node serve \
+  --listen 0.0.0.0:57292 \
+  --database-url /var/lib/miden-note-transport/node.db \
+  --max-storage-bytes 1073741824
 ```
 
 ## Docker Compose
 
-The repository includes a Docker Compose setup for the node plus telemetry services:
+The repository includes a Docker Compose setup for the node with persistent SQLite storage:
 
 ```bash
 make docker-node-up
 ```
-
-This starts:
-
-- note transport node;
-- OpenTelemetry Collector;
-- Tempo;
-- Prometheus;
-- Grafana.
 
 Use:
 
@@ -94,30 +106,24 @@ make docker-node-down
 
 to stop the stack.
 
-The Compose node service passes `--database-url /app/data/node.db` and mounts `/app/data` on the `node_data` volume, so note storage survives container restarts.
+Compose runs the migration command before it starts the node. Both services mount `/app/data` on the `node_data` volume. Compose forwards either supported OTLP endpoint variable from the host environment or `.env` file.
 
 ## Ports
 
 | Port | Service |
 | --- | --- |
 | `57292` | Note transport gRPC API. |
-| `4317` | OTLP gRPC receiver in the collector. |
-| `4318` | OTLP HTTP receiver in the collector. |
-| `3000` | Grafana. |
-| `9090` | Prometheus. |
-| `3200` | Tempo. |
 
-The note transport node exposes gRPC health through the same gRPC server, not a separate HTTP health port.
+The gRPC server exposes the note transport API and the health service on port `57292`.
 
 ## Database behavior
 
-Use a file-backed SQLite path for production-like deployments. The default `:memory:` database is useful for local testing but loses all notes on restart.
+The serving process requires a migrated PostgreSQL database or an existing file-backed SQLite database. In-memory storage is available only to tests.
 
-The node runs embedded migrations at startup. The current schema stores note IDs with a uniqueness constraint and uses a monotonic `seq` column for pagination.
+The database assigns monotonic cursors and tracks retained payload bytes in the same write transaction. A retry with the same note ID succeeds without adding another row. Fetches and cleanup are bounded by their configured limits.
 
 ## Operational cautions
 
-- Treat debug logs as sensitive. Note IDs and tags can be correlated with user activity.
-- Configure a retention period that matches the expected offline window for your users.
-- Monitor request errors. Duplicate note IDs or invalid note headers are rejected.
-- Use `FetchNotes` for durable catch-up. Streaming is best used as a live update channel after a fetch cycle.
+Treat debug logs as sensitive because note IDs and tags can be correlated with user activity. Set cleanup retention to cover the expected offline window for users.
+
+Monitor request errors because invalid headers, invalid details, commitment mismatches, and writes over either storage limit are rejected. Use `FetchNotes` for durable catch-up before relying on streaming for live updates.

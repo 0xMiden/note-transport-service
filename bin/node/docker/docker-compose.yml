@@ -1,89 +1,30 @@
 services:
-  # Miden Note Transport Node
+  migrate:
+    build:
+      context: .
+      dockerfile: bin/node/docker/Dockerfile
+    command: ["migrate", "--database-url", "/app/data/node.db"]
+    volumes:
+      - node_data:/app/data
+
   miden-note-transport-node:
     build:
       context: .
       dockerfile: bin/node/docker/Dockerfile
     ports:
       - "57292:57292"  # gRPC
-    command: ["miden-note-transport-node", "--host", "0.0.0.0", "--database-url", "/app/data/node.db"]
+    command: ["serve", "--listen", "0.0.0.0:57292", "--database-url", "/app/data/node.db", "--max-storage-bytes", "1073741824"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     environment:
       - JSON_LOGGING=true
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-      - OTEL_SERVICE_NAME=miden-note-transport-node
+      - OTEL_EXPORTER_OTLP_ENDPOINT
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
       - RUST_LOG=INFO
       - DOCKER_ENV=true
     volumes:
       - node_data:/app/data
-    depends_on:
-      - otel-collector
-    networks:
-      - telemetry
-
-  # OpenTelemetry Collector
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
-    volumes:
-      - ./bin/node/docker/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
-    ports:
-      - "4317:4317"     # OTLP gRPC receiver (apps send traces here)
-      - "4318:4318"     # OTLP HTTP receiver
-      - "13133:13133"   # Health check
-      - "1777:1777"     # pprof
-      - "9464:9464"     # Prometheus metrics
-    depends_on:
-      - tempo
-    networks:
-      - telemetry
-
-  # Traces
-  tempo:
-    image: grafana/tempo:latest
-    command: [ "-config.file=/etc/tempo.yaml" ]
-    volumes:
-      - ./bin/node/docker/tempo.yaml:/etc/tempo.yaml:ro
-    ports:
-      - "3200:3200"   # tempo
-    networks:
-      - telemetry
-
-  # Metrics
-  prometheus:
-    image: prom/prometheus:latest
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-    volumes:
-      - ./bin/node/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    ports:
-      - "9090:9090"
-    networks:
-      - telemetry
-    depends_on:
-      - otel-collector
-
-  # Visualization
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - grafana_data:/var/lib/grafana
-    networks:
-      - telemetry
-    depends_on:
-      - tempo
-
 
 volumes:
-  grafana_data:
   node_data:
-  prometheus_data:
-
-networks:
-  telemetry:
-    driver: bridge

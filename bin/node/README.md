@@ -13,11 +13,7 @@ The binary will be available on `./target/release/miden-note-transport-node`.
 
 ## Docker setup
 
-A docker-based setup is provided. In addition to the main node, the configured setup provides,
-- OpenTelemetry Collector;
-- Tempo (Traces);
-- Prometheus (Metrics);
-- Grafana (Visualization).
+The Docker Compose setup migrates a persistent SQLite database before it starts the node. Set an OTLP endpoint when the node should export telemetry to an external collector.
 
 ## License
 This project is [MIT licensed](../../LICENSE).

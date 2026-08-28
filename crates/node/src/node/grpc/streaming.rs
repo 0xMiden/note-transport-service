@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use miden_note_transport_proto::miden_note_transport::{StreamNotesUpdate, TransportNote};
+use miden_note_transport_proto::miden_note_transport::v1::{StreamNotesUpdate, TransportNote};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 
@@ -94,9 +94,9 @@ impl NoteStreamerManager {
 
         let mut updates = vec![];
         for (tag, tag_data) in &self.tags {
-            let snotes = self.database.fetch_notes(*tag, tag_data.cursor).await?;
+            let page = self.database.fetch_notes(*tag, tag_data.cursor).await?;
             let mut cursor = tag_data.cursor;
-            for snote in &snotes {
+            for snote in &page.notes {
                 // Advance cursor using the DB-assigned monotonic `seq`
                 // (matches the pull-side fetch_notes contract). Using
                 // `created_at` here is what caused the original race.
@@ -108,7 +108,7 @@ impl NoteStreamerManager {
             }
 
             // Convert to protobuf format
-            let pnotes = snotes.into_iter().map(TransportNote::from).collect::<Vec<_>>();
+            let pnotes = page.notes.into_iter().map(TransportNote::from).collect::<Vec<_>>();
             let notespg = (pnotes, cursor);
 
             if !notespg.0.is_empty() {

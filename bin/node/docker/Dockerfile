@@ -44,4 +44,5 @@ LABEL org.opencontainers.image.created=$CREATED \
 # Expose port
 EXPOSE 57292
 
-CMD ["miden-note-transport-node", "--host", "0.0.0.0"]
+ENTRYPOINT ["miden-note-transport-node"]
+CMD ["serve", "--listen", "0.0.0.0:57292"]

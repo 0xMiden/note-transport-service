@@ -11,7 +11,7 @@ The note transport node is intentionally small: it accepts note bytes, indexes t
 
 1. A sender creates a private note in a Miden transaction.
 2. After the note data is available locally, the sender calls `SendNote` with a serialized note header and note details.
-3. The transport node parses the header, extracts the note ID and tag, and stores the header and details in SQLite.
+3. The transport node parses the header and plaintext details, checks their shared commitment, and stores the note by its ID and tag.
 4. A recipient calls `FetchNotes` for one or more tags and receives matching notes with a cursor.
 5. The recipient stores the returned cursor and uses it on the next fetch.
 
@@ -26,9 +26,9 @@ The transport node stores:
 - serialized header bytes;
 - serialized details bytes;
 - creation timestamp;
-- `seq`, a monotonic SQLite `AUTOINCREMENT` value.
+- `seq`, a monotonic value assigned by the database.
 
-The note ID column is unique. Re-sending the same note ID is rejected by the database instead of creating a duplicate row.
+The note ID is unique. Sending that ID again succeeds without adding a row or replacing the first stored note.
 
 ## Cursor pagination
 
@@ -43,10 +43,11 @@ message FetchNotesRequest {
 message FetchNotesResponse {
     repeated TransportNote notes = 1;
     fixed64 cursor = 2;
+    bool has_more = 3;
 }
 ```
 
-The server returns notes matching any requested tag with `seq > cursor`, ordered by ascending `seq`, up to the server batch size. The response cursor is the highest `seq` returned. A client should persist that value and send it on the next request.
+The server returns notes matching any requested tag with `seq > cursor`, ordered by ascending `seq`, up to the server row and byte limits. The response cursor is the highest `seq` returned. A client should persist that value and send it on the next request while `has_more` is true.
 
 Current limits:
 
@@ -55,12 +56,6 @@ Current limits:
 - There is no client-specified `limit` field in the protobuf API.
 
 The multi-tag query runs in one database snapshot. This avoids a race where separate per-tag queries could advance the cursor past a note inserted between queries.
-
-## Legacy cursor handling
-
-Earlier designs used timestamp cursors. Existing clients may have stored timestamp-sized cursor values. The node treats cursor values above `1_000_000_000_000` as legacy timestamp cursors and resets the effective query cursor to `0`.
-
-This lets upgraded clients recover instead of waiting for `seq` to reach an old timestamp-sized value.
 
 ## Streaming
 
@@ -84,15 +79,13 @@ The current server implementation does not use the request cursor to initialize 
 
 ## Storage and retention
 
-The node uses SQLite and embedded migrations. File-backed databases use a larger connection pool. In-memory databases use a single connection because SQLite `:memory:` databases are isolated per connection.
+The node supports SQLite and PostgreSQL with explicit schema migration. The serving process checks migration versions and checksums without changing the schema. In-memory SQLite is reserved for tests.
 
-Notes older than the configured retention period are removed by a maintenance task.
+Storage tracks retained payload bytes and rejects writes above the configured limit. Fetches have row and byte limits. Operators remove one bounded batch of expired notes with the cleanup command.
 
 ## Block context
 
-The current protobuf API does not include commitment block number, note metadata, or inclusion proof fields. The transport node stores only `header` and `details`.
-
-This means the node cannot tell a client which block committed a fetched note. Clients must reconcile fetched notes with chain state themselves. The client-side lookback workaround and the proposed transport-level block context are tracked separately in [0xMiden/note-transport-service#68](https://github.com/0xMiden/note-transport-service/issues/68).
+The optional `after_block_num` field gives the client a lower bound for its chain scan. The sender supplies this hint, and the service stores it without checking chain state. Clients must still reconcile fetched notes with the Miden network.
 
 ## What the node does not do
 

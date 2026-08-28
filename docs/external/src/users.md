@@ -9,14 +9,14 @@ This page covers integrating with the note transport gRPC API.
 
 ## API surface
 
-The service is defined in `proto/proto/miden_note_transport.proto`.
+The service is defined in `proto/proto/miden_note_transport.proto` under the
+`miden_note_transport.v1` package.
 
 ```protobuf
 service MidenNoteTransport {
     rpc SendNote(SendNoteRequest) returns (SendNoteResponse);
     rpc FetchNotes(FetchNotesRequest) returns (FetchNotesResponse);
     rpc StreamNotes(StreamNotesRequest) returns (stream StreamNotesUpdate);
-    rpc Stats(google.protobuf.Empty) returns (StatsResponse);
 }
 ```
 
@@ -37,14 +37,15 @@ message TransportNote {
 }
 ```
 
-`header` must be a serialized Miden `NoteHeader`. The node parses it to extract the note ID and tag. `details` is opaque to the transport node and may contain encrypted note details.
+`header` must be a serialized Miden `NoteHeader`. `details` must be serialized plaintext Miden `NoteDetails`. The node rejects the request unless the details commitment matches the header.
 
 The server rejects:
 
 - requests without a note;
 - headers that cannot be parsed as `NoteHeader`;
-- details larger than the configured `--max-note-size`;
-- duplicate note IDs.
+- notes larger than the configured `--max-note-size`;
+- details that cannot be parsed or do not match the header;
+- writes that would exceed the storage byte limit.
 
 ## Fetch notes
 
@@ -59,6 +60,7 @@ message FetchNotesRequest {
 message FetchNotesResponse {
     repeated TransportNote notes = 1;
     fixed64 cursor = 2;
+    bool has_more = 3;
 }
 ```
 
@@ -68,11 +70,11 @@ Use this flow:
 2. Send all tags the client wants to check, up to 128 tags.
 3. Import or process the returned notes.
 4. Persist the response `cursor`.
-5. Repeat with the stored cursor.
+5. Repeat with the stored cursor while `has_more` is true.
 
-The response cursor is the highest server-side `seq` value returned in that response. Never fabricate cursor values; use values returned by the server.
+The response cursor is the highest server-side `seq` value returned in that response. A cursor belongs to the exact set of requested tags. Start again at `0` when that set changes.
 
-The server batch size is 500 notes. If a response contains many notes, call `FetchNotes` again with the returned cursor until the response is empty or smaller than the batch size.
+Each response is capped at 500 notes and 3 MiB. Use `has_more` because either limit can end a page.
 
 ## Stream notes
 
@@ -101,26 +103,6 @@ Current behavior to account for:
 
 On reconnect, run `FetchNotes` with your persisted cursor before opening a new stream.
 
-## Stats
-
-`Stats` returns aggregate counts:
-
-```protobuf
-message StatsResponse {
-    uint64 total_notes = 1;
-    uint64 total_tags = 2;
-    repeated TagStats notes_per_tag = 3;
-}
-
-message TagStats {
-    fixed32 tag = 1;
-    uint64 note_count = 2;
-    google.protobuf.Timestamp last_activity = 3;
-}
-```
-
-The current server returns `total_notes` and `total_tags`. Per-tag statistics are not populated yet.
-
 ## Client sync pattern
 
 A typical client should:
@@ -143,9 +125,9 @@ The transport node does not provide commitment block numbers or inclusion proofs
 - Check whether the note expired under the node retention policy.
 - Reset the local transport cursor to `0` if client state is suspected to be ahead of the server.
 
-### Duplicate send fails
+### Duplicate sends
 
-The database stores note IDs uniquely. Sending the same note twice is rejected instead of producing two stored rows.
+Sending the same note ID again succeeds without adding a row.
 
 ### Streaming misses notes
 
@@ -153,4 +135,4 @@ Use `FetchNotes` for catch-up. Streaming is not a replacement for durable cursor
 
 ### Large notes are rejected
 
-The `--max-note-size` setting applies to the note details size. Increase it on the operator side only if the deployment is prepared to accept larger payloads.
+The `--max-note-size` setting applies to the serialized header and plaintext details together. Increase it only when the deployment is prepared to accept larger payloads.

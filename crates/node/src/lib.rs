@@ -3,7 +3,7 @@
 //! Implementation of the Miden Transport Layer node for private notes.
 //!
 //! The implementation is focused on performance and privacy.
-//! Only (optionally-encrypted) notes are stored.
+//! Only notes with valid plaintext details are stored.
 //!
 //! Features include,
 //! - sending and receiving notes;
@@ -12,12 +12,10 @@
 //! - metrics and traces, exported through the OpenTelemetry framework for monitoring.
 //!
 //! ## Database
-//! Notes are stored in a database, implementing the
-//! [`Database`](`crate::database::DatabaseBackend`). A SQLite-based  implementation is provided.
+//! Notes are stored through [`Database`](`crate::database::Database`). The storage contract is
+//! private to this crate, with SQLite and PostgreSQL implementations.
 //!
-//! ### Maintenance
-//! A periodic task [`DatabaseMaintenance`](`crate::database::DatabaseMaintenance`) takes care of
-//! maintaining the database (cleaning up older notes).
+//! Schema migration and retention cleanup are explicit operator commands.
 //!
 //! ## Telemetry
 //! Metrics and traces to monitor the node state are provided.

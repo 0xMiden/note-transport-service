@@ -7,18 +7,18 @@ use std::time::Duration;
 
 use chrono::Utc;
 use miden_note_transport_proto::FILE_DESCRIPTOR_SET;
-use miden_note_transport_proto::miden_note_transport::miden_note_transport_server::MidenNoteTransportServer;
-use miden_note_transport_proto::miden_note_transport::{
+use miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_server::MidenNoteTransportServer;
+use miden_note_transport_proto::miden_note_transport::v1::{
     FetchNotesRequest,
     FetchNotesResponse,
     SendNoteRequest,
     SendNoteResponse,
-    StatsResponse,
     StreamNotesRequest,
     TransportNote,
 };
+use miden_protocol::note::NoteDetails;
 use miden_protocol::utils::serde::Deserializable;
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::mpsc;
 use tonic::Status;
 use tonic_web::GrpcWebLayer;
@@ -53,16 +53,16 @@ pub struct GrpcServer {
 /// [`GrpcServer`] configuration
 #[derive(Clone, Debug)]
 pub struct GrpcServerConfig {
-    /// Server host
-    pub host: String,
-    /// Server port
-    pub port: u16,
+    /// Address on which the server listens.
+    pub listen: SocketAddr,
     /// Maximum note size to be stored
     pub max_note_size: usize,
     /// Maximum number of concurrent connections
     pub max_connections: usize,
     /// Connection timeout in seconds
     pub request_timeout: usize,
+    /// Maximum bytes retained by storage.
+    pub max_storage_bytes: u64,
 }
 
 /// Streaming task interface context
@@ -74,11 +74,11 @@ pub(super) struct StreamerCtx {
 impl Default for GrpcServerConfig {
     fn default() -> Self {
         Self {
-            host: "127.0.0.1".to_string(),
-            port: 57292,
+            listen: "127.0.0.1:57292".parse().expect("default listen address is valid"),
             max_note_size: 512_000,
             max_connections: 4096,
             request_timeout: 4,
+            max_storage_bytes: 1024 * 1024 * 1024,
         }
     }
 }
@@ -97,6 +97,7 @@ impl GrpcServer {
 
     /// gRPC server running-task
     pub async fn serve(self) -> crate::Result<()> {
+        let listen = self.config.listen;
         let (health_reporter, health_svc) = tonic_health::server::health_reporter();
         health_reporter.set_serving::<MidenNoteTransportServer<Self>>().await;
 
@@ -107,10 +108,6 @@ impl GrpcServer {
             .map_err(|e| {
                 crate::Error::Internal(format!("Failed to build reflection service: {e}"))
             })?;
-
-        let addr = format!("{}:{}", self.config.host, self.config.port)
-            .parse::<SocketAddr>()
-            .map_err(|e| crate::Error::Internal(format!("Invalid address: {e}")))?;
 
         let cors = CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any);
 
@@ -123,7 +120,7 @@ impl GrpcServer {
             .add_service(health_svc)
             .add_service(reflection_svc)
             .add_service(self.into_service())
-            .serve(addr)
+            .serve(listen)
             .await
             .map_err(|e| crate::Error::Internal(format!("Server error: {e}")))
     }
@@ -141,7 +138,7 @@ impl StreamerCtx {
 }
 
 #[tonic::async_trait]
-impl miden_note_transport_proto::miden_note_transport::miden_note_transport_server::MidenNoteTransport
+impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_server::MidenNoteTransport
     for GrpcServer
 {
     #[tracing::instrument(skip(self, request), fields(
@@ -176,6 +173,16 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
                 tracing::warn!(reason = "invalid_header", "send_note rejected");
                 Status::invalid_argument(format!("Invalid header: {e:?}"))
             })?;
+        let details = NoteDetails::read_from_bytes(&pnote.details).map_err(|_| {
+            tracing::warn!(reason = "invalid_details", "send_note rejected");
+            Status::invalid_argument("Invalid note details")
+        })?;
+        if details.commitment() != header.details_commitment() {
+            tracing::warn!(reason = "details_commitment_mismatch", "send_note rejected");
+            return Err(Status::invalid_argument(
+                "Note details do not match the note header",
+            ));
+        }
 
         tracing::debug!(
             note_id = %header.id(),
@@ -195,8 +202,14 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         };
 
         self.database
-            .store_note(&note_for_db)
-            .await.map_err(|e| tonic::Status::internal(format!("Failed to store note: {e:?}")))?;
+            .store_note(&note_for_db, self.config.max_storage_bytes)
+            .await
+            .map_err(|error| match error {
+                crate::database::DatabaseError::Capacity(message) => {
+                    tonic::Status::resource_exhausted(message)
+                },
+                error => tonic::Status::internal(format!("Failed to store note: {error:?}")),
+            })?;
 
         timer.finish("ok");
 
@@ -252,14 +265,14 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         // two per-tag queries and get leapfrogged when rcursor advanced past
         // its seq on the next fetch. A single `tag IN (…)` query reads all
         // matching rows in one consistent snapshot.
-        let stored_notes = self
+        let page = self
             .database
             .fetch_notes_by_tags(&tags, cursor)
             .await
             .map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
 
         let mut rcursor = cursor;
-        for stored_note in &stored_notes {
+        for stored_note in &page.notes {
             let seq_cursor: u64 = stored_note
                 .seq
                 .try_into()
@@ -267,7 +280,7 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             rcursor = rcursor.max(seq_cursor);
         }
 
-        let proto_notes: Vec<_> = stored_notes.into_iter().map(TransportNote::from).collect();
+        let proto_notes: Vec<_> = page.notes.into_iter().map(TransportNote::from).collect();
 
         span.record("notes_returned", proto_notes.len());
         span.record("response_cursor", rcursor);
@@ -280,7 +293,11 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             proto_notes_size,
         );
 
-        Ok(tonic::Response::new(FetchNotesResponse { notes: proto_notes, cursor: rcursor }))
+        Ok(tonic::Response::new(FetchNotesResponse {
+            notes: proto_notes,
+            cursor: rcursor,
+            has_more: page.has_more,
+        }))
     }
 
     type StreamNotesStream = Sub;
@@ -310,25 +327,6 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         Ok(tonic::Response::new(sub))
     }
 
-    #[tracing::instrument(skip(self), fields(operation = "grpc.stats.request"))]
-    async fn stats(
-        &self,
-        _request: tonic::Request<()>,
-    ) -> Result<tonic::Response<StatsResponse>, tonic::Status> {
-        let (total_notes, total_tags) = self
-            .database
-            .get_stats()
-            .await.map_err(|e| tonic::Status::internal(format!("Failed to get stats: {e:?}")))?;
-
-        let response = StatsResponse {
-            total_notes,
-            total_tags,
-            notes_per_tag: Vec::new(), // TODO: Implement notes_per_tag
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        };
-
-        Ok(tonic::Response::new(response))
-    }
 }
 
 impl Drop for StreamerCtx {
@@ -344,19 +342,64 @@ impl Drop for StreamerCtx {
 mod tests {
     use std::sync::Arc;
 
-    use miden_note_transport_proto::miden_note_transport::FetchNotesRequest;
-    use miden_note_transport_proto::miden_note_transport::miden_note_transport_server::MidenNoteTransport;
+    use miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_server::MidenNoteTransport;
+    use miden_note_transport_proto::miden_note_transport::v1::{
+        FetchNotesRequest,
+        SendNoteRequest,
+        TransportNote,
+    };
+    use miden_protocol::note::{Note, NoteDetails, NoteHeader};
+    use miden_protocol::utils::serde::Serializable;
 
     use super::*;
-    use crate::database::{Database, DatabaseConfig};
+    use crate::database::Database;
     use crate::metrics::Metrics;
+    use crate::test_utils::test_note;
 
     async fn test_server() -> GrpcServer {
         let metrics = Metrics::default();
-        let db = Arc::new(
-            Database::connect(DatabaseConfig::default(), metrics.db.clone()).await.unwrap(),
-        );
-        GrpcServer::new(db, GrpcServerConfig::default(), metrics.grpc)
+        let database = Arc::new(Database::connect_for_test(metrics.db.clone()).await.unwrap());
+        GrpcServer::new(database, GrpcServerConfig::default(), metrics.grpc)
+    }
+
+    fn send_request(note: Note) -> tonic::Request<SendNoteRequest> {
+        let header = NoteHeader::from(&note).to_bytes();
+        let details = NoteDetails::from(note).to_bytes();
+        tonic::Request::new(SendNoteRequest {
+            note: Some(TransportNote { header, details, after_block_num: None }),
+        })
+    }
+
+    #[tokio::test]
+    async fn send_note_accepts_matching_plaintext_details() {
+        test_server().await.send_note(send_request(test_note())).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_note_rejects_malformed_details() {
+        let note = test_note();
+        let request = tonic::Request::new(SendNoteRequest {
+            note: Some(TransportNote {
+                header: NoteHeader::from(&note).to_bytes(),
+                details: vec![0],
+                after_block_num: None,
+            }),
+        });
+
+        let status = test_server().await.send_note(request).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn send_note_rejects_details_from_another_note() {
+        let header = NoteHeader::from(test_note()).to_bytes();
+        let details = NoteDetails::from(test_note()).to_bytes();
+        let request = tonic::Request::new(SendNoteRequest {
+            note: Some(TransportNote { header, details, after_block_num: None }),
+        });
+
+        let status = test_server().await.send_note(request).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 
     /// A client sending more tags than `MAX_TAGS_PER_FETCH_REQUEST` is rejected

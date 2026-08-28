@@ -30,8 +30,6 @@ async-trait = { version = "0.1" }
 base64 = { version = "0.22" }
 chrono = { features = ["serde"], version = "0.4" }
 clap = { features = ["derive", "env"], version = "4.5" }
-deadpool = { default-features = false, features = ["managed", "rt_tokio_1"], version = "0.12" }
-deadpool-sync = { version = "0.1" }
 fs-err = { version = "3" }
 futures = { version = "0.3" }
 miette = { version = "7.6" }
@@ -44,14 +42,20 @@ opentelemetry-otlp = { default-features = false, features = [
 ], version = "0.30" }
 opentelemetry_sdk = { features = ["metrics", "rt-tokio", "testing"], version = "0.30" }
 prost = { version = "0.14" }
-prost-types = { default-features = false, version = "0.14" }
 protox = { version = "0.9" }
-rand = { version = "0.9" }
+rand = { version = "0.10" }
 serde = { features = ["derive"], version = "1.0" }
 serde_json = { version = "1.0" }
-serial_test = { version = "3.2" }
+sqlx = { default-features = false, features = [
+  "chrono",
+  "macros",
+  "migrate",
+  "postgres",
+  "runtime-tokio-rustls",
+  "sqlite",
+], version = "0.8" }
 thiserror = { default-features = false, version = "2.0" }
-tokio = { features = ["macros", "net", "rt-multi-thread"], version = "1.48" }
+tokio = { features = ["macros", "net", "rt-multi-thread", "sync", "time"], version = "1.48" }
 tonic = { default-features = false, features = ["codegen", "transport"], version = "0.14" }
 tonic-health = { version = "0.14" }
 tonic-prost = { version = "0.14" }
