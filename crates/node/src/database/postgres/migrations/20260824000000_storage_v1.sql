@@ -1,7 +1,6 @@
 CREATE TABLE notes (
     seq BIGINT PRIMARY KEY,
-    envelope_digest BYTEA NOT NULL UNIQUE,
-    id BYTEA NOT NULL,
+    id BYTEA NOT NULL UNIQUE,
     tag BIGINT NOT NULL,
     header BYTEA NOT NULL,
     details BYTEA NOT NULL,

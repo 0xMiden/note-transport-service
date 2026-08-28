@@ -64,7 +64,7 @@ struct ServeArgs {
     #[arg(long, default_value = "1024")]
     max_streams: usize,
 
-    /// Maximum bytes retained for note headers and encrypted details.
+    /// Maximum bytes retained for note headers and details.
     #[arg(long, env = "MNT_MAX_STORAGE_BYTES")]
     max_storage_bytes: u64,
 }

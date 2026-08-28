@@ -11,7 +11,6 @@ use super::{
     DatabaseWatch,
     FetchPage,
     StoreResult,
-    envelope_digest,
 };
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteTag, StoredNote};
@@ -76,14 +75,14 @@ impl DatabaseBackend for PostgresDatabase {
         max_retained_bytes: u64,
     ) -> Result<StoreResult, DatabaseError> {
         let timer = self.metrics.db_store_note();
-        let envelope_bytes = note.header.to_bytes().len() + note.details.len();
-        if envelope_bytes > super::FETCH_NOTES_MAX_BYTES {
+        let note_bytes = note.header.to_bytes().len() + note.details.len();
+        if note_bytes > super::FETCH_NOTES_MAX_BYTES {
             return Err(DatabaseError::Capacity(format!(
-                "envelope exceeds the {} byte fetch limit",
+                "note exceeds the {} byte fetch limit",
                 super::FETCH_NOTES_MAX_BYTES
             )));
         }
-        let digest = envelope_digest(note);
+        let note_id = note.header.id();
         let mut tx = self.pool.begin().await.map_err(query_error)?;
         let metadata = sqlx::query(
             "SELECT next_cursor, retained_bytes FROM storage_metadata \
@@ -95,12 +94,11 @@ impl DatabaseBackend for PostgresDatabase {
         let seq: i64 = metadata.try_get("next_cursor").map_err(query_error)?;
         let current_retained: i64 = metadata.try_get("retained_bytes").map_err(query_error)?;
 
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM notes WHERE envelope_digest = $1)")
-                .bind(digest.as_slice())
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(query_error)?;
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM notes WHERE id = $1)")
+            .bind(note_id.as_bytes().as_slice())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(query_error)?;
         if exists {
             tx.rollback().await.map_err(query_error)?;
             self.metrics.record_retained_bytes(u64::try_from(current_retained).unwrap_or(0));
@@ -108,14 +106,14 @@ impl DatabaseBackend for PostgresDatabase {
             return Ok(StoreResult::AlreadyPresent);
         }
 
-        let retained_bytes = i64::try_from(envelope_bytes)
+        let retained_bytes = i64::try_from(note_bytes)
             .map_err(|_| DatabaseError::Serialization("note is too large".to_string()))?;
         let next_retained = current_retained
             .checked_add(retained_bytes)
             .ok_or_else(|| DatabaseError::Capacity("retained byte count overflow".to_string()))?;
         if u64::try_from(next_retained).unwrap_or(u64::MAX) > max_retained_bytes {
             return Err(DatabaseError::Capacity(format!(
-                "accepting this envelope would exceed the {max_retained_bytes} byte limit"
+                "accepting this note would exceed the {max_retained_bytes} byte limit"
             )));
         }
         sqlx::query(
@@ -128,12 +126,11 @@ impl DatabaseBackend for PostgresDatabase {
         .map_err(query_error)?;
         sqlx::query(
             "INSERT INTO notes \
-             (seq, envelope_digest, id, tag, header, details, created_at, after_block_num) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+             (seq, id, tag, header, details, created_at, after_block_num) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(seq)
-        .bind(digest.as_slice())
-        .bind(note.header.id().as_bytes().as_slice())
+        .bind(note_id.as_bytes().as_slice())
         .bind(i64::from(note.header.metadata().tag().as_u32()))
         .bind(note.header.to_bytes())
         .bind(&note.details)

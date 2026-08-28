@@ -37,14 +37,14 @@ message TransportNote {
 }
 ```
 
-`header` must be a serialized Miden `NoteHeader`. The node parses it to extract the note ID and tag. `details` must be a sealed message produced by the sender. The node checks its framing but cannot decrypt it.
+`header` must be a serialized Miden `NoteHeader`. `details` must be serialized plaintext Miden `NoteDetails`. The node rejects the request unless the details commitment matches the header.
 
 The server rejects:
 
 - requests without a note;
 - headers that cannot be parsed as `NoteHeader`;
 - envelopes larger than the configured `--max-note-size`;
-- details that are not a valid sealed message;
+- details that cannot be parsed or do not match the header;
 - writes that would exceed the storage byte limit.
 
 ## Fetch notes
@@ -127,7 +127,7 @@ The transport node does not provide commitment block numbers or inclusion proofs
 
 ### Duplicate sends
 
-Sending the same envelope again succeeds without adding a row. A different sealed envelope may use the same note ID. Clients deduplicate imported notes by note ID.
+Sending the same note ID again succeeds without adding a row.
 
 ### Streaming misses notes
 
