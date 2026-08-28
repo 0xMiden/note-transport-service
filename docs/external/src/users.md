@@ -43,7 +43,7 @@ The server rejects:
 
 - requests without a note;
 - headers that cannot be parsed as `NoteHeader`;
-- envelopes larger than the configured `--max-note-size`;
+- notes larger than the configured `--max-note-size`;
 - details that cannot be parsed or do not match the header;
 - writes that would exceed the storage byte limit.
 
@@ -135,4 +135,4 @@ Reopen the stream with the last cursor that was handled successfully. Use `Fetch
 
 ### Large notes are rejected
 
-The `--max-note-size` setting applies to the serialized header and sealed details together. Increase it only when the deployment is prepared to accept larger payloads.
+The `--max-note-size` setting applies to the serialized header and plaintext details together. Increase it only when the deployment is prepared to accept larger payloads.

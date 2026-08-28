@@ -127,10 +127,10 @@ On SIGTERM or Ctrl-C, the server marks the API unavailable, stops accepting new 
 
 The serving process requires a migrated PostgreSQL database or an existing file-backed SQLite database. In-memory storage is available only to tests.
 
-The database assigns monotonic cursors and tracks retained payload bytes in the same write transaction. An identical envelope retry succeeds without adding another row. Fetches and cleanup are bounded by their configured limits.
+The database assigns monotonic cursors and tracks retained payload bytes in the same write transaction. A retry with the same note ID succeeds without adding another row. Fetches and cleanup are bounded by their configured limits.
 
 ## Operational cautions
 
 Treat debug logs as sensitive because note IDs and tags can be correlated with user activity. Set cleanup retention to cover the expected offline window for users.
 
-Monitor `grpc_error_count`, `grpc_rejected_write_count`, and `grpc_active_streams`. Invalid headers, unsealed details, and writes over either storage limit are rejected. Use `FetchNotes` for durable catch-up before relying on streaming for live updates.
+Monitor `grpc_error_count`, `grpc_rejected_write_count`, and `grpc_active_streams`. The service rejects invalid headers and details, commitment mismatches, and writes over either storage limit. Use `FetchNotes` for durable catch-up before relying on streaming for live updates.

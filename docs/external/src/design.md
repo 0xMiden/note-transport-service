@@ -11,7 +11,7 @@ The note transport node is intentionally small: it accepts note bytes, indexes t
 
 1. A sender creates a private note in a Miden transaction.
 2. After the note data is available locally, the sender calls `SendNote` with a serialized note header and note details.
-3. The transport node parses the header, extracts the note ID and tag, and stores the envelope.
+3. The transport node parses the header and plaintext details, checks their shared commitment, and stores the note by its ID and tag.
 4. A recipient calls `FetchNotes` for one or more tags and receives matching notes with a cursor.
 5. The recipient stores the returned cursor and uses it on the next fetch.
 
@@ -28,7 +28,7 @@ The transport node stores:
 - creation timestamp;
 - `seq`, a monotonic value assigned by the database.
 
-The full envelope digest is unique. Sending the same bytes again succeeds without adding a row. A different sealed envelope may contain the same note ID, so clients must deduplicate imported notes by note ID.
+The note ID is unique. Sending that ID again succeeds without adding a row or replacing the first stored note.
 
 ## Cursor pagination
 
