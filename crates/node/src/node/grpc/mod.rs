@@ -118,7 +118,7 @@ impl GrpcServer {
         let database = self.database.clone();
         let readiness_shutdown = self.shutdown.clone();
         let mut readiness_reporter = health_reporter.clone();
-        let readiness_task = tokio::spawn(async move {
+        let readiness = async move {
             loop {
                 tokio::select! {
                     () = readiness_shutdown.cancelled() => {
@@ -135,7 +135,7 @@ impl GrpcServer {
                     },
                 }
             }
-        });
+        };
 
         let reflection_svc = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
@@ -148,9 +148,7 @@ impl GrpcServer {
         let cors = CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any);
         let request_timeout = self.config.request_timeout;
         let shutdown = self.shutdown.clone();
-        let signal_shutdown = self.shutdown.clone();
         let serve_shutdown = self.shutdown.clone();
-        let signal_task = tokio::spawn(shutdown_signal(signal_shutdown));
 
         let server = tonic::transport::Server::builder()
             .accept_http1(true)
@@ -163,11 +161,14 @@ impl GrpcServer {
             .add_service(health_svc)
             .add_service(reflection_svc)
             .add_service(self.into_service())
-            .serve_with_incoming_shutdown(incoming, serve_shutdown.cancelled_owned());
-        let result = server.await.map_err(|e| crate::Error::Internal(format!("Server error: {e}")));
-        shutdown.cancel();
-        signal_task.abort();
-        readiness_task.abort();
+            .serve_with_incoming_shutdown(incoming, shutdown_signal(serve_shutdown));
+        let server = async move {
+            let result =
+                server.await.map_err(|e| crate::Error::Internal(format!("Server error: {e}")));
+            shutdown.cancel();
+            result
+        };
+        let (result, ()) = tokio::join!(server, readiness);
         result
     }
 }
@@ -536,13 +537,17 @@ async fn shutdown_signal(shutdown: CancellationToken) {
             Ok(signal) => signal,
             Err(error) => {
                 tracing::error!(%error, "failed to install SIGTERM handler");
-                let _ = tokio::signal::ctrl_c().await;
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    _ = tokio::signal::ctrl_c() => {},
+                }
                 shutdown.cancel();
                 return;
             },
         };
 
     tokio::select! {
+        () = shutdown.cancelled() => return,
         result = tokio::signal::ctrl_c() => {
             if let Err(error) = result {
                 tracing::error!(%error, "failed to install Ctrl-C handler");
@@ -555,8 +560,13 @@ async fn shutdown_signal(shutdown: CancellationToken) {
 
 #[cfg(not(unix))]
 async fn shutdown_signal(shutdown: CancellationToken) {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        tracing::error!(%error, "failed to install shutdown signal handler");
+    tokio::select! {
+        () = shutdown.cancelled() => return,
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                tracing::error!(%error, "failed to install shutdown signal handler");
+            }
+        },
     }
     shutdown.cancel();
 }
