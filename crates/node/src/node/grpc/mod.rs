@@ -471,6 +471,7 @@ async fn stream_notes(
                     return;
                 }
             },
+            () = tx.closed() => return,
             () = shutdown.cancelled() => return,
         };
         match fetched {
@@ -487,11 +488,11 @@ async fn stream_notes(
                         cursor,
                     };
                 tokio::select! {
-                    result = tokio::time::timeout(operation_timeout, tx.send(Ok(update))) => {
+                    result = tx.send_timeout(Ok(update), operation_timeout) => {
                         match result {
-                            Ok(Ok(())) => {},
-                            Ok(Err(_)) => return,
-                            Err(_) => {
+                            Ok(()) => {},
+                            Err(mpsc::error::SendTimeoutError::Closed(_)) => return,
+                            Err(mpsc::error::SendTimeoutError::Timeout(_)) => {
                                 metrics.error("stream_notes", tonic::Code::DeadlineExceeded);
                                 end_stream(
                                     &terminal_tx,
@@ -738,6 +739,10 @@ mod tests {
 
         assert_eq!(second.code(), tonic::Code::ResourceExhausted);
         drop(first);
+        let _slot = tokio::time::timeout(Duration::from_secs(1), server.stream_slots.acquire())
+            .await
+            .expect("stream slot was not released after the client disconnected")
+            .unwrap();
     }
 
     #[tokio::test]
