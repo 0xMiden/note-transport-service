@@ -3,6 +3,7 @@ use miden_protocol::note::NoteHeader;
 use miden_protocol::utils::serde::{Deserializable, Serializable};
 use sqlx::postgres::{PgListener, PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
+use tokio_util::task::AbortOnDrop;
 
 use super::{
     DatabaseBackend,
@@ -21,7 +22,7 @@ const CHANGE_CHANNEL: &str = "miden_note_transport_changes";
 pub struct PostgresDatabase {
     pool: PgPool,
     notifications: DatabaseNotifications,
-    listener: tokio::task::JoinHandle<()>,
+    _listener: AbortOnDrop,
     metrics: MetricsDatabase,
 }
 
@@ -47,7 +48,12 @@ impl PostgresDatabase {
         let notifications = DatabaseNotifications::new();
         let listener = spawn_listener(url.to_string(), pg_listener, notifications.clone());
 
-        Ok(Self { pool, notifications, listener, metrics })
+        Ok(Self {
+            pool,
+            notifications,
+            _listener: listener,
+            metrics,
+        })
     }
 
     pub async fn migrate(url: &str) -> Result<(), DatabaseError> {
@@ -57,12 +63,6 @@ impl PostgresDatabase {
             .await
             .map_err(connection_error)?;
         MIGRATOR.run(&pool).await.map_err(migration_error)
-    }
-}
-
-impl Drop for PostgresDatabase {
-    fn drop(&mut self) {
-        self.listener.abort();
     }
 }
 
@@ -265,8 +265,8 @@ fn spawn_listener(
     url: String,
     mut listener: PgListener,
     notifications: DatabaseNotifications,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> AbortOnDrop {
+    let listener = tokio::spawn(async move {
         loop {
             match listener.try_recv().await {
                 Ok(Some(notification)) => {
@@ -316,7 +316,8 @@ fn spawn_listener(
                 },
             }
         }
-    })
+    });
+    AbortOnDrop::new(listener.abort_handle())
 }
 
 async fn verify_schema(pool: &PgPool) -> Result<(), DatabaseError> {
