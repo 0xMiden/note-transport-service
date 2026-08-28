@@ -92,16 +92,16 @@ message StreamNotesUpdate {
 }
 ```
 
-Use streaming as a live update channel. For durable sync, first call `FetchNotes` and persist its cursor.
+Set the request cursor to the last update the client handled. The server first drains stored notes after that cursor, then waits for committed writes. Persist each returned cursor only after handling its notes.
 
-Current behavior to account for:
+Streaming behavior to account for:
 
-- The protobuf request includes a `cursor`, but the current server implementation does not seed subscription state from that field.
 - Subscriptions are per tag.
-- The streamer polls for updates every 500 ms.
-- If a subscriber cannot keep up with the bounded channel, the subscription is dropped.
+- Updates are ordered by the durable database cursor.
+- Delivery is at least once, so a reconnect may repeat an update.
+- Storage notification failure ends the stream with `UNAVAILABLE`.
 
-On reconnect, run `FetchNotes` with your persisted cursor before opening a new stream.
+On reconnect, open a new stream with the persisted cursor. `FetchNotes` uses the same cursor contract and remains available for explicit catch-up.
 
 ## Client sync pattern
 
@@ -131,7 +131,7 @@ Sending the same note ID again succeeds without adding a row.
 
 ### Streaming misses notes
 
-Use `FetchNotes` for catch-up. Streaming is not a replacement for durable cursor sync in the current implementation.
+Reopen the stream with the last cursor that was handled successfully. Use `FetchNotes` with the same cursor if explicit catch-up is easier for the client.
 
 ### Large notes are rejected
 

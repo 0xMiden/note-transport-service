@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracing::{error, info};
+use tracing::info;
 
 use self::grpc::{GrpcServer, GrpcServerConfig};
 use crate::Result;
@@ -33,6 +33,26 @@ pub struct NodeConfig {
 impl Node {
     /// Node constructor
     pub async fn init(config: NodeConfig) -> Result<Self> {
+        if config.grpc.max_note_size > crate::database::FETCH_NOTES_MAX_BYTES {
+            return Err(crate::Error::Internal(format!(
+                "max note size cannot exceed {} bytes",
+                crate::database::FETCH_NOTES_MAX_BYTES
+            )));
+        }
+        if config.grpc.max_storage_bytes < config.grpc.max_note_size as u64 {
+            return Err(crate::Error::Internal(
+                "max storage bytes must be at least the maximum note size".to_string(),
+            ));
+        }
+        if config.grpc.max_requests == 0 {
+            return Err(crate::Error::Internal("max requests must be nonzero".to_string()));
+        }
+        if config.grpc.max_streams == 0 {
+            return Err(crate::Error::Internal("max streams must be nonzero".to_string()));
+        }
+        if config.grpc.request_timeout == 0 {
+            return Err(crate::Error::Internal("request timeout must be nonzero".to_string()));
+        }
         let metrics = Metrics::default();
         let database =
             Arc::new(Database::connect(config.database.clone(), metrics.db.clone()).await?);
@@ -46,10 +66,8 @@ impl Node {
     }
 
     /// Node running-task
-    pub async fn entrypoint(self) {
+    pub async fn entrypoint(self) -> Result<()> {
         info!("Starting Miden Transport Node");
-        if let Err(e) = self.grpc.serve().await {
-            error!("Server error: {e}");
-        }
+        self.grpc.serve().await
     }
 }

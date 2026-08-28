@@ -73,13 +73,15 @@ message StreamNotesUpdate {
 }
 ```
 
-Internally, a background task polls SQLite every 500 ms for new notes matching active subscriptions and forwards updates through bounded channels.
+Each stream subscribes to storage changes before its first database read. It reads every available page, sends the durable cursor with each update, then waits for another committed write.
 
-The current server implementation does not use the request cursor to initialize subscription state. Use `FetchNotes` for durable catch-up and cursor persistence, then use streaming only as a live update channel.
+SQLite signals commits inside the process. PostgreSQL uses `LISTEN/NOTIFY`. These signals only wake the stream; database reads remain authoritative. Listener loss ends affected streams with `UNAVAILABLE`, and reconnection forces a fresh read for new streams.
+
+The request cursor initializes stream delivery. Clients can reopen a stream with the last cursor they handled without a silent gap. Delivery is ordered and may repeat an update after a disconnect.
 
 ## Storage and retention
 
-The node supports SQLite and PostgreSQL with explicit schema migration. The serving process checks migration versions and checksums without changing the schema. In-memory SQLite is reserved for tests.
+The node supports PostgreSQL and SQLite with explicit schema migration. The serving process checks migration versions and checksums without changing the schema. In-memory SQLite is reserved for tests.
 
 Storage tracks retained payload bytes and rejects writes above the configured limit. Fetches have row and byte limits. Operators remove one bounded batch of expired notes with the cleanup command.
 

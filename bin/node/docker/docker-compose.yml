@@ -1,30 +1,50 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: note_transport
+      POSTGRES_PASSWORD: local-only
+      POSTGRES_USER: note_transport
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U note_transport -d note_transport"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   migrate:
     build:
       context: .
       dockerfile: bin/node/docker/Dockerfile
-    command: ["migrate", "--database-url", "/app/data/node.db"]
-    volumes:
-      - node_data:/app/data
+    command: ["migrate"]
+    environment:
+      MNT_DATABASE_URL: postgres://note_transport:local-only@postgres/note_transport
+    depends_on:
+      postgres:
+        condition: service_healthy
 
-  miden-note-transport-node:
+  note-transport:
     build:
       context: .
       dockerfile: bin/node/docker/Dockerfile
     ports:
       - "57292:57292"  # gRPC
-    command: ["serve", "--listen", "0.0.0.0:57292", "--database-url", "/app/data/node.db", "--max-storage-bytes", "1073741824"]
+    command: ["serve", "--listen", "0.0.0.0:57292"]
     depends_on:
       migrate:
         condition: service_completed_successfully
     environment:
-      - JSON_LOGGING=true
-      - OTEL_EXPORTER_OTLP_ENDPOINT
-      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-      - RUST_LOG=INFO
-      - DOCKER_ENV=true
-    volumes:
-      - node_data:/app/data
+      JSON_LOGGING: "true"
+      MNT_DATABASE_URL: postgres://note_transport:local-only@postgres/note_transport
+      MNT_MAX_STORAGE_BYTES: "1073741824"
+      OTEL_EXPORTER_OTLP_ENDPOINT:
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:
+      RUST_LOG: info
+    init: true
+    restart: unless-stopped
 
 volumes:
-  node_data:
+  postgres_data:

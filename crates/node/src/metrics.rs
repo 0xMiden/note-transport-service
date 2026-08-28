@@ -1,5 +1,7 @@
+use std::cell::Cell;
+
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter, UpDownCounter};
 
 /// Transport metrics using OpenTelemetry metrics
 ///
@@ -25,6 +27,9 @@ pub struct MetricsGrpc {
     fetch_notes_duration: Histogram<f64>,
     fetch_notes_replied_notes_number: Histogram<u64>,
     fetch_notes_replied_notes_size: Histogram<u64>,
+    error_count: Counter<u64>,
+    rejected_write_count: Counter<u64>,
+    active_streams: UpDownCounter<i64>,
 }
 
 /// [`crate::database::Database`] metrics
@@ -91,6 +96,19 @@ impl MetricsGrpc {
             .with_unit("B")
             .build();
 
+        let error_count = meter
+            .u64_counter("grpc_error_count")
+            .with_description("Total number of application RPC errors")
+            .build();
+        let rejected_write_count = meter
+            .u64_counter("grpc_rejected_write_count")
+            .with_description("Total number of note writes rejected by a resource limit")
+            .build();
+        let active_streams = meter
+            .i64_up_down_counter("grpc_active_streams")
+            .with_description("Current number of live StreamNotes RPCs")
+            .build();
+
         Self {
             send_note_count,
             send_note_duration,
@@ -99,6 +117,9 @@ impl MetricsGrpc {
             fetch_notes_duration,
             fetch_notes_replied_notes_number,
             fetch_notes_replied_notes_size,
+            error_count,
+            rejected_write_count,
+            active_streams,
         }
     }
 
@@ -137,6 +158,28 @@ impl MetricsGrpc {
             .record(number, &[KeyValue::new("operation", operation.to_string())]);
         self.fetch_notes_replied_notes_size
             .record(size_b, &[KeyValue::new("operation", operation.to_string())]);
+    }
+
+    /// Record one application RPC error.
+    pub fn error(&self, operation: &'static str, status: tonic::Code) {
+        self.error_count.add(
+            1,
+            &[
+                KeyValue::new("operation", operation),
+                KeyValue::new("status", status.to_string()),
+            ],
+        );
+    }
+
+    /// Record a write rejected by an application resource limit.
+    pub fn rejected_write(&self, reason: &'static str) {
+        self.rejected_write_count.add(1, &[KeyValue::new("reason", reason)]);
+    }
+
+    /// Increment the live stream gauge until the returned guard is dropped.
+    pub fn stream_started(&self) -> ActiveStreamGuard {
+        self.active_streams.add(1, &[]);
+        ActiveStreamGuard { counter: self.active_streams.clone() }
     }
 }
 
@@ -208,6 +251,17 @@ impl MetricsDatabase {
     }
 }
 
+/// Decrements the active stream gauge when a streaming task ends.
+pub struct ActiveStreamGuard {
+    counter: UpDownCounter<i64>,
+}
+
+impl Drop for ActiveStreamGuard {
+    fn drop(&mut self) {
+        self.counter.add(-1, &[]);
+    }
+}
+
 /// Measure a request
 ///
 /// Increases the request counter and measures request duration.
@@ -225,6 +279,7 @@ fn request_count_measure<'a>(
         operation: operation.to_string(),
         start,
         histogram,
+        finished: Cell::new(false),
     }
 }
 
@@ -240,11 +295,17 @@ pub struct RequestTimer<'a> {
     operation: String,
     start: std::time::Instant,
     histogram: &'a Histogram<f64>,
+    finished: Cell<bool>,
 }
 
 impl RequestTimer<'_> {
     /// Finish the request and record the duration
     pub fn finish(&self, status: &str) {
+        self.record(status);
+        self.finished.set(true);
+    }
+
+    fn record(&self, status: &str) {
         let duration = self.start.elapsed();
         let duration_s = duration.as_secs_f64();
 
@@ -261,6 +322,8 @@ impl RequestTimer<'_> {
 
 impl Drop for RequestTimer<'_> {
     fn drop(&mut self) {
-        self.finish("dropped");
+        if !self.finished.get() {
+            self.record("dropped");
+        }
     }
 }

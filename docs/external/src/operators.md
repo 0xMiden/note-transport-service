@@ -40,7 +40,8 @@ Then start the service:
 miden-note-transport-node serve \
   --listen 0.0.0.0:57292 \
   --database-url "$MNT_DATABASE_URL" \
-  --max-storage-bytes 1073741824
+  --max-storage-bytes 1073741824 \
+  --max-streams 1024
 ```
 
 The service checks the migration version and checksum at startup. It does not apply migrations.
@@ -61,8 +62,9 @@ miden-note-transport-node cleanup \
 | `--listen` | `127.0.0.1:57292` | Address and port to bind to. It can also come from `MNT_LISTEN`. |
 | `--database-url` | required | Existing SQLite path or PostgreSQL URL. It can also come from `MNT_DATABASE_URL`. |
 | `--max-note-size` | `512000` | Maximum envelope size in bytes. It can also come from `MNT_MAX_NOTE_SIZE`. |
-| `--max-connections` | `4096` | Maximum concurrent gRPC requests. It can also come from `MNT_MAX_CONNECTIONS`. |
-| `--request-timeout` | `4` | Per-request timeout in seconds. It can also come from `MNT_REQUEST_TIMEOUT`. |
+| `--max-requests` | `4096` | Maximum concurrent gRPC requests. It can also come from `MNT_MAX_REQUESTS`. |
+| `--request-timeout` | `4` | Unary request and stream operation timeout in seconds. It can also come from `MNT_REQUEST_TIMEOUT`. |
+| `--max-streams` | `1024` | Maximum live `StreamNotes` requests. A slot remains held until its stream ends. |
 | `--max-storage-bytes` | required | Maximum retained payload bytes. It can also come from `MNT_MAX_STORAGE_BYTES`. |
 
 The `migrate` command requires `--database-url`. The `cleanup` command also accepts `--retention-days` and `--max-rows`. Those values can come from `MNT_RETENTION_DAYS` and `MNT_CLEANUP_MAX_ROWS`.
@@ -73,8 +75,9 @@ Telemetry is configured through environment variables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | OTLP endpoint for trace and metric export. Setting it enables export. |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Shared OTLP endpoint that takes precedence when both endpoint variables are set. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Fallback OTLP endpoint for traces and metrics. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | OTLP trace endpoint. It takes precedence over the fallback. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | OTLP metric endpoint. It takes precedence over the fallback. |
 | `JSON_LOGGING` | `false` | Emits JSON logs when set to `true`. |
 | `RUST_LOG` | `INFO` | Standard Rust tracing filter. |
 
@@ -92,7 +95,7 @@ miden-note-transport-node serve \
 
 ## Docker Compose
 
-The repository includes a Docker Compose setup for the node with persistent SQLite storage:
+The repository includes a Docker Compose setup for local PostgreSQL storage:
 
 ```bash
 make docker-node-up
@@ -106,7 +109,7 @@ make docker-node-down
 
 to stop the stack.
 
-Compose runs the migration command before it starts the node. Both services mount `/app/data` on the `node_data` volume. Compose forwards either supported OTLP endpoint variable from the host environment or `.env` file.
+Compose waits for PostgreSQL, runs the migration command, and starts the node as an unprivileged user. PostgreSQL data remains in the `postgres_data` volume. Compose forwards the supported OTLP endpoint variables from the host environment or `.env` file.
 
 ## Ports
 
@@ -114,7 +117,11 @@ Compose runs the migration command before it starts the node. Both services moun
 | --- | --- |
 | `57292` | Note transport gRPC API. |
 
-The gRPC server exposes the note transport API and the health service on port `57292`.
+The gRPC server exposes the note transport API and the health service on port `57292`. It serves plaintext HTTP/2 and gRPC Web because TLS terminates at Traefik. The server sends HTTP/2 keepalive probes for long-lived streams.
+
+The empty gRPC health service name reports process liveness. The `miden_note_transport.v1.MidenNoteTransport` service reports readiness. Readiness requires a working database query and, for PostgreSQL, a working change-notification listener.
+
+On SIGTERM or Ctrl-C, the server marks the API unavailable, stops accepting new requests, and closes active note streams. Startup and serving failures produce a nonzero exit status. Telemetry providers flush during normal shutdown.
 
 ## Database behavior
 
@@ -126,4 +133,4 @@ The database assigns monotonic cursors and tracks retained payload bytes in the 
 
 Treat debug logs as sensitive because note IDs and tags can be correlated with user activity. Set cleanup retention to cover the expected offline window for users.
 
-Monitor request errors because invalid headers, invalid details, commitment mismatches, and writes over either storage limit are rejected. Use `FetchNotes` for durable catch-up before relying on streaming for live updates.
+Monitor `grpc_error_count`, `grpc_rejected_write_count`, and `grpc_active_streams`. The service rejects invalid headers and details, commitment mismatches, and writes over either storage limit. Use `FetchNotes` for durable catch-up before relying on streaming for live updates.

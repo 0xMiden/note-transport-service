@@ -7,7 +7,14 @@ use miden_protocol::utils::serde::{Deserializable, Serializable};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
-use super::{DatabaseBackend, DatabaseError, FetchPage, StoreResult};
+use super::{
+    DatabaseBackend,
+    DatabaseError,
+    DatabaseNotifications,
+    DatabaseWatch,
+    FetchPage,
+    StoreResult,
+};
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteTag, StoredNote};
 
@@ -15,6 +22,7 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("src/database/sqlite/m
 
 pub struct SqliteDatabase {
     pool: SqlitePool,
+    notifications: DatabaseNotifications,
     metrics: MetricsDatabase,
 }
 
@@ -32,7 +40,11 @@ impl SqliteDatabase {
                 .await
                 .map_err(query_error)?;
         metrics.record_retained_bytes(u64::try_from(retained).unwrap_or(0));
-        Ok(Self { pool, metrics })
+        Ok(Self {
+            pool,
+            notifications: DatabaseNotifications::new(),
+            metrics,
+        })
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -42,7 +54,11 @@ impl SqliteDatabase {
     ) -> Result<Self, DatabaseError> {
         let pool = open_pool(url, true, true).await?;
         MIGRATOR.run(&pool).await.map_err(migration_error)?;
-        Ok(Self { pool, metrics })
+        Ok(Self {
+            pool,
+            notifications: DatabaseNotifications::new(),
+            metrics,
+        })
     }
 
     pub async fn migrate(url: &str, allow_in_memory: bool) -> Result<(), DatabaseError> {
@@ -129,6 +145,7 @@ impl DatabaseBackend for SqliteDatabase {
         .map_err(query_error)?;
 
         tx.commit().await.map_err(query_error)?;
+        self.notifications.notify(note.header.metadata().tag());
         self.metrics
             .record_retained_bytes(u64::try_from(next_retained).unwrap_or(u64::MAX));
         timer.finish("ok");
@@ -232,6 +249,14 @@ impl DatabaseBackend for SqliteDatabase {
         tx.commit().await.map_err(query_error)?;
         self.metrics.record_retained_bytes(u64::try_from(retained).unwrap_or(0));
         Ok(seqs.len() as u64)
+    }
+
+    fn subscribe(&self, tag: NoteTag) -> tokio::sync::watch::Receiver<DatabaseWatch> {
+        self.notifications.subscribe(tag)
+    }
+
+    async fn is_ready(&self) -> bool {
+        sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(&self.pool).await.is_ok()
     }
 }
 

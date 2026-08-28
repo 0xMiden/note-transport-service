@@ -2,7 +2,9 @@ mod error;
 mod postgres;
 mod sqlite;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub use self::error::DatabaseError;
 use self::postgres::PostgresDatabase;
@@ -13,6 +15,9 @@ use crate::types::{NoteTag, StoredNote};
 pub(crate) const FETCH_NOTES_MAX_ROWS: u32 = 500;
 /// Hard upper bound for one stored envelope and one fetched page.
 pub const FETCH_NOTES_MAX_BYTES: usize = 3 * 1024 * 1024;
+
+#[cfg(test)]
+pub(crate) static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Result of storing a note.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,6 +35,102 @@ pub struct FetchPage {
     pub notes: Vec<StoredNote>,
     /// Whether another request may return more notes.
     pub has_more: bool,
+}
+
+/// Storage change state observed by streaming readers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DatabaseWatch {
+    generation: u64,
+    ready: bool,
+}
+
+impl DatabaseWatch {
+    const fn new(ready: bool) -> Self {
+        Self { generation: 0, ready }
+    }
+
+    fn advance(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    pub(crate) const fn is_ready(self) -> bool {
+        self.ready
+    }
+}
+
+#[derive(Clone)]
+struct DatabaseNotifications {
+    inner: Arc<DatabaseNotificationsInner>,
+}
+
+struct DatabaseNotificationsInner {
+    ready: AtomicBool,
+    tags: Mutex<HashMap<NoteTag, tokio::sync::watch::Sender<DatabaseWatch>>>,
+}
+
+impl DatabaseNotifications {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(DatabaseNotificationsInner {
+                ready: AtomicBool::new(true),
+                tags: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    fn subscribe(&self, tag: NoteTag) -> tokio::sync::watch::Receiver<DatabaseWatch> {
+        let mut tags = self.inner.tags.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        tags.retain(|_, sender| sender.receiver_count() > 0);
+        tags.entry(tag)
+            .or_insert_with(|| {
+                tokio::sync::watch::channel(DatabaseWatch::new(
+                    self.inner.ready.load(Ordering::Acquire),
+                ))
+                .0
+            })
+            .subscribe()
+    }
+
+    fn notify(&self, tag: NoteTag) {
+        let mut tags = self.inner.tags.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if tags.get(&tag).is_some_and(|sender| sender.receiver_count() == 0) {
+            tags.remove(&tag);
+        } else if let Some(sender) = tags.get(&tag) {
+            sender.send_modify(DatabaseWatch::advance);
+        }
+    }
+
+    fn notify_all(&self) {
+        let mut tags = self.inner.tags.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        tags.retain(|_, sender| {
+            if sender.receiver_count() == 0 {
+                false
+            } else {
+                sender.send_modify(DatabaseWatch::advance);
+                true
+            }
+        });
+    }
+
+    fn set_ready(&self, ready: bool) {
+        self.inner.ready.store(ready, Ordering::Release);
+        let mut tags = self.inner.tags.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        tags.retain(|_, sender| {
+            if sender.receiver_count() == 0 {
+                false
+            } else {
+                sender.send_modify(|state| {
+                    state.ready = ready;
+                    state.advance();
+                });
+                true
+            }
+        });
+    }
+
+    fn is_ready(&self) -> bool {
+        self.inner.ready.load(Ordering::Acquire)
+    }
 }
 
 #[async_trait::async_trait]
@@ -53,6 +154,10 @@ trait DatabaseBackend: Send + Sync {
         retention_days: u32,
         max_rows: u32,
     ) -> Result<u64, DatabaseError>;
+
+    fn subscribe(&self, tag: NoteTag) -> tokio::sync::watch::Receiver<DatabaseWatch>;
+
+    async fn is_ready(&self) -> bool;
 }
 
 /// Database connection configuration.
@@ -153,8 +258,25 @@ impl Database {
     ) -> Result<u64, DatabaseError> {
         self.backend.cleanup_old_notes(retention_days, max_rows).await
     }
+
+    /// Subscribe to committed storage changes.
+    pub(crate) fn subscribe(&self, tag: NoteTag) -> tokio::sync::watch::Receiver<DatabaseWatch> {
+        self.backend.subscribe(tag)
+    }
+
+    /// Check whether storage can serve requests and deliver commit signals.
+    pub async fn is_ready(&self) -> bool {
+        self.backend.is_ready().await
+    }
 }
 
+pub(crate) fn advance_cursor(notes: &[StoredNote], cursor: u64) -> Result<u64, DatabaseError> {
+    notes.iter().try_fold(cursor, |cursor, note| {
+        let seq = u64::try_from(note.seq)
+            .map_err(|_| DatabaseError::Deserialization("negative note cursor".to_string()))?;
+        Ok(cursor.max(seq))
+    })
+}
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -181,8 +303,20 @@ mod tests {
     }
 
     async fn backend_contract(db: &Database) {
+        let mut changes = db.subscribe(TAG_LOCAL_ANY.into());
+        let mut unrelated = db.subscribe((TAG_LOCAL_ANY + 1).into());
         let first = note();
         assert_eq!(db.store_note(&first, u64::MAX).await.unwrap(), StoreResult::Inserted);
+        tokio::time::timeout(std::time::Duration::from_secs(1), changes.changed())
+            .await
+            .expect("the committed note did not notify subscribers")
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), unrelated.changed())
+                .await
+                .is_err(),
+            "a write woke a subscriber for another tag"
+        );
         assert_eq!(db.store_note(&first, 0).await.unwrap(), StoreResult::AlreadyPresent);
 
         let mut retry = first.clone();
@@ -213,6 +347,7 @@ mod tests {
         let Ok(url) = std::env::var("MNT_TEST_POSTGRES_URL") else {
             return;
         };
+        let _guard = POSTGRES_TEST_LOCK.lock().await;
         let config = DatabaseConfig::new(&url);
         Database::migrate(&config).await.unwrap();
         reset_postgres(&url).await;

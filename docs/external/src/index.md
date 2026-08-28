@@ -31,7 +31,7 @@ Private note contents are not published on-chain. The chain stores note commitme
 | --- | --- | --- |
 | `SendNote` | Publish one transported note. | The `header` and plaintext `details` must decode as Miden note types and share the same details commitment. |
 | `FetchNotes` | Durable catch-up by tag. | Returns notes for one or more tags using a server-assigned `seq` cursor. |
-| `StreamNotes` | Live updates for one tag. | Use it after a fetch cycle; current subscriptions do not initialize from the request cursor. |
+| `StreamNotes` | Resumable updates for one tag. | Starts after the request cursor and returns a durable cursor with each update. |
 
 ## Transport model
 

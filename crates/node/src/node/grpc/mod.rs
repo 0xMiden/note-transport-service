@@ -1,5 +1,3 @@
-mod streaming;
-
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,15 +16,15 @@ use miden_note_transport_proto::miden_note_transport::v1::{
 };
 use miden_protocol::note::NoteDetails;
 use miden_protocol::utils::serde::Deserializable;
-use rand::RngExt;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
+use tokio_util::sync::CancellationToken;
 use tonic::Status;
+use tonic::codegen::tokio_stream::StreamExt as _;
+use tonic::transport::server::TcpIncoming;
 use tonic_web::GrpcWebLayer;
 use tower::limit::GlobalConcurrencyLimitLayer;
-use tower::timeout::TimeoutLayer;
 use tower_http::cors::{Any, CorsLayer};
 
-use self::streaming::{NoteStreamer, StreamerMessage, Sub, Subface};
 use crate::database::Database;
 use crate::metrics::MetricsGrpc;
 
@@ -41,44 +39,44 @@ use crate::metrics::MetricsGrpc;
 /// A realistic wallet tracks O(10) to O(100) tags; 128 is generous without
 /// being an attack surface.
 const MAX_TAGS_PER_FETCH_REQUEST: usize = 128;
+const READINESS_TIMEOUT: Duration = Duration::from_secs(1);
+const API_SERVICE_NAME: &str = "miden_note_transport.v1.MidenNoteTransport";
 
 /// Miden Note Transport gRPC server
 pub struct GrpcServer {
     database: Arc<Database>,
     config: GrpcServerConfig,
-    streamer: StreamerCtx,
     metrics: MetricsGrpc,
+    stream_slots: Arc<Semaphore>,
+    shutdown: CancellationToken,
 }
 
 /// [`GrpcServer`] configuration
 #[derive(Clone, Debug)]
 pub struct GrpcServerConfig {
-    /// Address on which the server listens.
+    /// Address and port to bind.
     pub listen: SocketAddr,
     /// Maximum note size to be stored
     pub max_note_size: usize,
-    /// Maximum number of concurrent connections
-    pub max_connections: usize,
+    /// Maximum number of concurrent requests.
+    pub max_requests: usize,
     /// Connection timeout in seconds
     pub request_timeout: usize,
     /// Maximum bytes retained by storage.
     pub max_storage_bytes: u64,
-}
-
-/// Streaming task interface context
-pub(super) struct StreamerCtx {
-    tx: mpsc::Sender<StreamerMessage>,
-    handle: tokio::task::JoinHandle<()>,
+    /// Maximum number of live streaming requests.
+    pub max_streams: usize,
 }
 
 impl Default for GrpcServerConfig {
     fn default() -> Self {
         Self {
-            listen: "127.0.0.1:57292".parse().expect("default listen address is valid"),
+            listen: "127.0.0.1:57292".parse().expect("default listen address must be valid"),
             max_note_size: 512_000,
-            max_connections: 4096,
+            max_requests: 4096,
             request_timeout: 4,
             max_storage_bytes: 1024 * 1024 * 1024,
+            max_streams: 1024,
         }
     }
 }
@@ -86,8 +84,15 @@ impl Default for GrpcServerConfig {
 impl GrpcServer {
     /// gRPC server constructor
     pub fn new(database: Arc<Database>, config: GrpcServerConfig, metrics: MetricsGrpc) -> Self {
-        let streamer = StreamerCtx::spawn(database.clone());
-        Self { database, config, streamer, metrics }
+        let stream_slots = Arc::new(Semaphore::new(config.max_streams));
+        let shutdown = CancellationToken::new();
+        Self {
+            database,
+            config,
+            metrics,
+            stream_slots,
+            shutdown,
+        }
     }
 
     /// Convert into a service
@@ -98,8 +103,39 @@ impl GrpcServer {
     /// gRPC server running-task
     pub async fn serve(self) -> crate::Result<()> {
         let listen = self.config.listen;
+        let incoming = TcpIncoming::bind(listen)
+            .map_err(|e| crate::Error::Internal(format!("Failed to bind {listen}: {e}")))?;
+        self.serve_with_incoming(incoming).await
+    }
+
+    async fn serve_with_incoming(self, incoming: TcpIncoming) -> crate::Result<()> {
         let (health_reporter, health_svc) = tonic_health::server::health_reporter();
-        health_reporter.set_serving::<MidenNoteTransportServer<Self>>().await;
+        health_reporter
+            .set_service_status("", tonic_health::ServingStatus::Serving)
+            .await;
+        set_api_health(&health_reporter, database_is_ready(&self.database).await).await;
+
+        let database = self.database.clone();
+        let readiness_shutdown = self.shutdown.clone();
+        let mut readiness_reporter = health_reporter.clone();
+        let readiness = async move {
+            loop {
+                tokio::select! {
+                    () = readiness_shutdown.cancelled() => {
+                        set_api_health(&readiness_reporter, false).await;
+                        readiness_reporter
+                            .set_service_status("", tonic_health::ServingStatus::NotServing)
+                            .await;
+                        readiness_reporter.clear_service_status(API_SERVICE_NAME).await;
+                        readiness_reporter.clear_service_status("").await;
+                        return;
+                    },
+                    () = tokio::time::sleep(Duration::from_secs(1)) => {
+                        set_api_health(&readiness_reporter, database_is_ready(&database).await).await;
+                    },
+                }
+            }
+        };
 
         let reflection_svc = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
@@ -110,30 +146,44 @@ impl GrpcServer {
             })?;
 
         let cors = CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any);
+        let request_timeout = self.config.request_timeout;
+        let shutdown = self.shutdown.clone();
+        let serve_shutdown = self.shutdown.clone();
 
-        tonic::transport::Server::builder()
+        let server = tonic::transport::Server::builder()
             .accept_http1(true)
+            .http2_keepalive_interval(Some(Duration::from_secs(30)))
+            .http2_keepalive_timeout(Some(Duration::from_secs(10)))
+            .timeout(Duration::from_secs(request_timeout as u64))
             .layer(cors)
             .layer(GrpcWebLayer::new())
-            .layer(GlobalConcurrencyLimitLayer::new(self.config.max_connections))
-            .layer(TimeoutLayer::new(Duration::from_secs(self.config.request_timeout as u64)))
+            .layer(GlobalConcurrencyLimitLayer::new(self.config.max_requests))
             .add_service(health_svc)
             .add_service(reflection_svc)
             .add_service(self.into_service())
-            .serve(listen)
-            .await
-            .map_err(|e| crate::Error::Internal(format!("Server error: {e}")))
+            .serve_with_incoming_shutdown(incoming, shutdown_signal(serve_shutdown));
+        let server = async move {
+            let result =
+                server.await.map_err(|e| crate::Error::Internal(format!("Server error: {e}")));
+            shutdown.cancel();
+            result
+        };
+        let (result, ()) = tokio::join!(server, readiness);
+        result
     }
 }
 
-impl StreamerCtx {
-    /// Spawn a [`NoteStreamer`] task
-    ///
-    /// Returns related context composed of the handle and `mpsc::Sender` `tx` for control messages.
-    pub(super) fn spawn(database: Arc<Database>) -> Self {
-        let (tx, rx) = mpsc::channel(128);
-        let handle = tokio::spawn(NoteStreamer::new(database, rx).stream());
-        Self { tx, handle }
+async fn database_is_ready(database: &Database) -> bool {
+    tokio::time::timeout(READINESS_TIMEOUT, database.is_ready())
+        .await
+        .unwrap_or(false)
+}
+
+async fn set_api_health(reporter: &tonic_health::server::HealthReporter, ready: bool) {
+    if ready {
+        reporter.set_serving::<MidenNoteTransportServer<GrpcServer>>().await;
+    } else {
+        reporter.set_not_serving::<MidenNoteTransportServer<GrpcServer>>().await;
     }
 }
 
@@ -150,20 +200,29 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         request: tonic::Request<SendNoteRequest>,
     ) -> Result<tonic::Response<SendNoteResponse>, tonic::Status> {
         let request_data = request.into_inner();
-        let pnote = request_data.note.ok_or_else(|| Status::invalid_argument("Missing note"))?;
+        let note_size = request_data
+            .note
+            .as_ref()
+            .map_or(0, |note| note.header.len() + note.details.len());
+        let timer = self.metrics.grpc_send_note_request(note_size as u64);
+        let pnote = request_data.note.ok_or_else(|| {
+            self.metrics.error("send_note", tonic::Code::InvalidArgument);
+            timer.finish("invalid_argument");
+            Status::invalid_argument("Missing note")
+        })?;
 
         // `header` + `details` are the stored payload; the cap, the metric, and
         // the span field all use the same number so accept and reject report
         // the same size.
-        let note_size = pnote.header.len() + pnote.details.len();
         let span = tracing::Span::current();
         span.record("note_size", note_size);
-
-        let timer = self.metrics.grpc_send_note_request(note_size as u64);
 
         // Validate note size
         if note_size > self.config.max_note_size {
             tracing::warn!(reason = "note_too_large", size = note_size, max = self.config.max_note_size, "send_note rejected");
+            self.metrics.rejected_write("envelope_size");
+            self.metrics.error("send_note", tonic::Code::ResourceExhausted);
+            timer.finish("resource_exhausted");
             return Err(Status::resource_exhausted(format!("Note too large ({note_size})")));
         }
 
@@ -171,14 +230,20 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         let header = miden_protocol::note::NoteHeader::read_from_bytes(&pnote.header)
             .map_err(|e| {
                 tracing::warn!(reason = "invalid_header", "send_note rejected");
+                self.metrics.error("send_note", tonic::Code::InvalidArgument);
+                timer.finish("invalid_argument");
                 Status::invalid_argument(format!("Invalid header: {e:?}"))
             })?;
         let details = NoteDetails::read_from_bytes(&pnote.details).map_err(|_| {
             tracing::warn!(reason = "invalid_details", "send_note rejected");
+            self.metrics.error("send_note", tonic::Code::InvalidArgument);
+            timer.finish("invalid_argument");
             Status::invalid_argument("Invalid note details")
         })?;
         if details.commitment() != header.details_commitment() {
             tracing::warn!(reason = "details_commitment_mismatch", "send_note rejected");
+            self.metrics.error("send_note", tonic::Code::InvalidArgument);
+            timer.finish("invalid_argument");
             return Err(Status::invalid_argument(
                 "Note details do not match the note header",
             ));
@@ -206,9 +271,16 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
             .await
             .map_err(|error| match error {
                 crate::database::DatabaseError::Capacity(message) => {
+                    self.metrics.rejected_write("storage_capacity");
+                    self.metrics.error("send_note", tonic::Code::ResourceExhausted);
+                    timer.finish("resource_exhausted");
                     tonic::Status::resource_exhausted(message)
                 },
-                error => tonic::Status::internal(format!("Failed to store note: {error:?}")),
+                error => {
+                    self.metrics.error("send_note", tonic::Code::Unavailable);
+                    timer.finish("unavailable");
+                    tonic::Status::unavailable(format!("Failed to store note: {error:?}"))
+                },
             })?;
 
         timer.finish("ok");
@@ -243,6 +315,8 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
                 max = MAX_TAGS_PER_FETCH_REQUEST,
                 "fetch_notes rejected"
             );
+            self.metrics.error("fetch_notes", tonic::Code::InvalidArgument);
+            timer.finish("invalid_argument");
             return Err(Status::invalid_argument(format!(
                 "Too many tags in fetch_notes request: {} (max {})",
                 request_data.tags.len(),
@@ -269,14 +343,22 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
             .database
             .fetch_notes_by_tags(&tags, cursor)
             .await
-            .map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
+            .map_err(|e| {
+                self.metrics.error("fetch_notes", tonic::Code::Unavailable);
+                timer.finish("unavailable");
+                tonic::Status::unavailable(format!("Failed to fetch notes: {e:?}"))
+            })?;
 
         let mut rcursor = cursor;
         for stored_note in &page.notes {
             let seq_cursor: u64 = stored_note
                 .seq
                 .try_into()
-                .map_err(|_| tonic::Status::internal("Negative seq in stored note"))?;
+                .map_err(|_| {
+                    self.metrics.error("fetch_notes", tonic::Code::Internal);
+                    timer.finish("internal");
+                    tonic::Status::internal("Negative seq in stored note")
+                })?;
             rcursor = rcursor.max(seq_cursor);
         }
 
@@ -300,7 +382,10 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         }))
     }
 
-    type StreamNotesStream = Sub;
+    type StreamNotesStream = tonic::codegen::tokio_stream::adapters::Chain<
+        tonic::codegen::tokio_stream::wrappers::ReceiverStream<StreamResult>,
+        tonic::codegen::tokio_stream::wrappers::ReceiverStream<StreamResult>,
+    >;
     #[tracing::instrument(skip(self, request), fields(
         operation = "grpc.stream_notes.request",
         subscription_id = tracing::field::Empty,
@@ -309,33 +394,182 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
         &self,
         request: tonic::Request<StreamNotesRequest>,
     ) -> Result<tonic::Response<Self::StreamNotesStream>, tonic::Status> {
+        let stream_slot = self.stream_slots.clone().try_acquire_owned().map_err(|_| {
+            self.metrics.error("stream_notes", tonic::Code::ResourceExhausted);
+            Status::resource_exhausted("too many live streams")
+        })?;
         let request_data = request.into_inner();
         let tag = request_data.tag.into();
-        let id: u64 = rand::rng().random();
+        let cursor = request_data.cursor;
+        let database = self.database.clone();
+        let changes = database.subscribe(tag);
+        let shutdown = self.shutdown.clone();
+        let metrics = self.metrics.clone();
+        let operation_timeout = Duration::from_secs(self.config.request_timeout as u64);
+        let (tx, rx) = mpsc::channel(1);
+        let (terminal_tx, terminal_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _stream_slot = stream_slot;
+            let _active_stream = metrics.stream_started();
+            stream_notes(
+                database,
+                tag,
+                cursor,
+                changes,
+                shutdown,
+                tx,
+                terminal_tx,
+                metrics,
+                operation_timeout,
+            )
+            .await;
+        });
 
-        let span = tracing::Span::current();
-        span.record("subscription_id", id);
-
-        tracing::debug!(tag = crate::types::NoteTag::as_u32(&tag), cursor = request_data.cursor, "stream_notes subscribe");
-
-        let (sub_tx, sub_rx) = mpsc::channel(32);
-        let sub = Sub::new(id, tag, sub_rx, self.streamer.tx.clone());
-        let subf = Subface::new(id, tag, sub_tx);
-        self.streamer.tx.try_send(StreamerMessage::AddSub(subf))
-                    .map_err(|e| tonic::Status::internal(format!("Failed sending internal streamer message: {e}")))?;
-
-        Ok(tonic::Response::new(sub))
+        let updates = tonic::codegen::tokio_stream::wrappers::ReceiverStream::new(rx);
+        let terminal = tonic::codegen::tokio_stream::wrappers::ReceiverStream::new(terminal_rx);
+        Ok(tonic::Response::new(updates.chain(terminal)))
     }
-
 }
 
-impl Drop for StreamerCtx {
-    fn drop(&mut self) {
-        if let Err(e) = self.tx.try_send(StreamerMessage::Shutdown) {
-            tracing::error!("Streamer shutdown message sending failure: {e}");
-            self.handle.abort();
+type StreamResult =
+    Result<miden_note_transport_proto::miden_note_transport::v1::StreamNotesUpdate, Status>;
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_notes(
+    database: Arc<Database>,
+    tag: crate::types::NoteTag,
+    mut cursor: u64,
+    mut changes: tokio::sync::watch::Receiver<crate::database::DatabaseWatch>,
+    shutdown: CancellationToken,
+    tx: mpsc::Sender<StreamResult>,
+    terminal_tx: mpsc::Sender<StreamResult>,
+    metrics: MetricsGrpc,
+    operation_timeout: Duration,
+) {
+    loop {
+        if shutdown.is_cancelled() {
+            return;
+        }
+        if !changes.borrow().is_ready() {
+            metrics.error("stream_notes", tonic::Code::Unavailable);
+            end_stream(
+                &terminal_tx,
+                Status::unavailable("note storage change notifications are unavailable"),
+            );
+            return;
+        }
+        let fetched = tokio::select! {
+            result = tokio::time::timeout(operation_timeout, database.fetch_notes(tag, cursor)) => {
+                if let Ok(result) = result {
+                    result
+                } else {
+                    metrics.error("stream_notes", tonic::Code::DeadlineExceeded);
+                    end_stream(
+                        &terminal_tx,
+                        Status::deadline_exceeded("note storage read timed out"),
+                    );
+                    return;
+                }
+            },
+            () = tx.closed() => return,
+            () = shutdown.cancelled() => return,
+        };
+        match fetched {
+            Ok(page) if !page.notes.is_empty() => {
+                let Ok(next_cursor) = crate::database::advance_cursor(&page.notes, cursor) else {
+                    metrics.error("stream_notes", tonic::Code::Internal);
+                    end_stream(&terminal_tx, Status::internal("invalid note cursor"));
+                    return;
+                };
+                cursor = next_cursor;
+                let update =
+                    miden_note_transport_proto::miden_note_transport::v1::StreamNotesUpdate {
+                        notes: page.notes.into_iter().map(TransportNote::from).collect(),
+                        cursor,
+                    };
+                tokio::select! {
+                    result = tx.send_timeout(Ok(update), operation_timeout) => {
+                        match result {
+                            Ok(()) => {},
+                            Err(mpsc::error::SendTimeoutError::Closed(_)) => return,
+                            Err(mpsc::error::SendTimeoutError::Timeout(_)) => {
+                                metrics.error("stream_notes", tonic::Code::DeadlineExceeded);
+                                end_stream(
+                                    &terminal_tx,
+                                    Status::deadline_exceeded("stream client is too slow"),
+                                );
+                                return;
+                            },
+                        }
+                    },
+                    () = shutdown.cancelled() => return,
+                };
+                continue;
+            },
+            Ok(_) => {},
+            Err(error) => {
+                metrics.error("stream_notes", tonic::Code::Unavailable);
+                end_stream(&terminal_tx, Status::unavailable(error.to_string()));
+                return;
+            },
+        }
+
+        tokio::select! {
+            result = changes.changed() => {
+                if result.is_err() {
+                    return;
+                }
+                changes.borrow_and_update();
+            },
+            () = tx.closed() => return,
+            () = shutdown.cancelled() => return,
         }
     }
+}
+
+fn end_stream(terminal_tx: &mpsc::Sender<StreamResult>, status: Status) {
+    let _ = terminal_tx.try_send(Err(status));
+}
+
+#[cfg(unix)]
+async fn shutdown_signal(shutdown: CancellationToken) {
+    let mut terminate =
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                tracing::error!(%error, "failed to install SIGTERM handler");
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    _ = tokio::signal::ctrl_c() => {},
+                }
+                shutdown.cancel();
+                return;
+            },
+        };
+
+    tokio::select! {
+        () = shutdown.cancelled() => return,
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                tracing::error!(%error, "failed to install Ctrl-C handler");
+            }
+        },
+        _ = terminate.recv() => {},
+    }
+    shutdown.cancel();
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal(shutdown: CancellationToken) {
+    tokio::select! {
+        () = shutdown.cancelled() => return,
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                tracing::error!(%error, "failed to install shutdown signal handler");
+            }
+        },
+    }
+    shutdown.cancel();
 }
 
 #[cfg(test)]
@@ -346,20 +580,27 @@ mod tests {
     use miden_note_transport_proto::miden_note_transport::v1::{
         FetchNotesRequest,
         SendNoteRequest,
+        StreamNotesRequest,
         TransportNote,
     };
     use miden_protocol::note::{Note, NoteDetails, NoteHeader};
     use miden_protocol::utils::serde::Serializable;
+    use tonic::codegen::tokio_stream::StreamExt;
 
     use super::*;
     use crate::database::Database;
     use crate::metrics::Metrics;
-    use crate::test_utils::test_note;
+    use crate::test_utils::{TAG_LOCAL_ANY, test_note, test_note_header};
+    use crate::types::StoredNote;
+
+    async fn test_server_with_database() -> (GrpcServer, Arc<Database>) {
+        let metrics = Metrics::default();
+        let db = Arc::new(Database::connect_for_test(metrics.db.clone()).await.unwrap());
+        (GrpcServer::new(db.clone(), GrpcServerConfig::default(), metrics.grpc), db)
+    }
 
     async fn test_server() -> GrpcServer {
-        let metrics = Metrics::default();
-        let database = Arc::new(Database::connect_for_test(metrics.db.clone()).await.unwrap());
-        GrpcServer::new(database, GrpcServerConfig::default(), metrics.grpc)
+        test_server_with_database().await.0
     }
 
     fn send_request(note: Note) -> tonic::Request<SendNoteRequest> {
@@ -437,5 +678,267 @@ mod tests {
         let response = result.expect("request at the cap must succeed").into_inner();
         assert_eq!(response.notes.len(), 0, "DB is empty, no notes returned");
         assert_eq!(response.cursor, 0);
+    }
+
+    #[tokio::test]
+    async fn stream_waits_for_a_post_commit_notification() {
+        let (server, database) = test_server_with_database().await;
+        let response = server
+            .stream_notes(tonic::Request::new(StreamNotesRequest { tag: TAG_LOCAL_ANY, cursor: 0 }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), stream.next()).await.is_err(),
+            "an idle stream must wait instead of producing empty pages",
+        );
+
+        database
+            .store_note(
+                &StoredNote {
+                    header: test_note_header(),
+                    details: vec![1, 2, 3],
+                    created_at: Utc::now(),
+                    seq: 0,
+                    after_block_num: None,
+                },
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let update = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.notes.len(), 1);
+        assert!(update.cursor > 0);
+    }
+
+    #[tokio::test]
+    async fn stream_limit_is_held_for_the_stream_lifetime() {
+        let metrics = Metrics::default();
+        let database = Arc::new(Database::connect_for_test(metrics.db.clone()).await.unwrap());
+        let config = GrpcServerConfig {
+            max_streams: 1,
+            ..GrpcServerConfig::default()
+        };
+        let server = GrpcServer::new(database, config, metrics.grpc);
+
+        let first = server
+            .stream_notes(tonic::Request::new(StreamNotesRequest { tag: TAG_LOCAL_ANY, cursor: 0 }))
+            .await
+            .unwrap();
+        let second = server
+            .stream_notes(tonic::Request::new(StreamNotesRequest { tag: TAG_LOCAL_ANY, cursor: 0 }))
+            .await;
+        let Err(second) = second else {
+            panic!("the second live stream must exceed the configured limit");
+        };
+
+        assert_eq!(second.code(), tonic::Code::ResourceExhausted);
+        drop(first);
+        let _slot = tokio::time::timeout(Duration::from_secs(1), server.stream_slots.acquire())
+            .await
+            .expect("stream slot was not released after the client disconnected")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_an_idle_stream() {
+        let server = test_server().await;
+        let shutdown = server.shutdown.clone();
+        let response = server
+            .stream_notes(tonic::Request::new(StreamNotesRequest { tag: TAG_LOCAL_ANY, cursor: 0 }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        shutdown.cancel();
+
+        let ended = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream did not end after shutdown");
+        assert!(ended.is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_marks_the_api_not_serving() {
+        let metrics = Metrics::default();
+        let database = Arc::new(Database::connect_for_test(metrics.db.clone()).await.unwrap());
+        let server = GrpcServer::new(database, GrpcServerConfig::default(), metrics.grpc);
+        let shutdown = server.shutdown.clone();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = incoming.local_addr().unwrap();
+        let server_task = tokio::spawn(server.serve_with_incoming(incoming));
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut client = tonic_health::pb::health_client::HealthClient::new(channel);
+        let mut health_watch = client
+            .watch(tonic::Request::new(tonic_health::pb::HealthCheckRequest {
+                service: API_SERVICE_NAME.to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        health_watch.message().await.unwrap().unwrap();
+
+        shutdown.cancel();
+
+        let update = tokio::time::timeout(Duration::from_secs(1), health_watch.message())
+            .await
+            .expect("API health did not change on shutdown")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            update.status,
+            tonic_health::pb::health_check_response::ServingStatus::NotServing as i32
+        );
+        let ended = tokio::time::timeout(Duration::from_secs(1), health_watch.message())
+            .await
+            .expect("API health watch did not close")
+            .unwrap();
+        assert!(ended.is_none());
+        tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server did not stop after the health watch closed")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_resumes_after_the_requested_cursor() {
+        let (server, database) = test_server_with_database().await;
+        for details in [vec![1], vec![2]] {
+            database
+                .store_note(
+                    &StoredNote {
+                        header: test_note_header(),
+                        details,
+                        created_at: Utc::now(),
+                        seq: 0,
+                        after_block_num: None,
+                    },
+                    u64::MAX,
+                )
+                .await
+                .unwrap();
+        }
+        let stored = database.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
+        let cursor = u64::try_from(stored.notes[0].seq).unwrap();
+        let response = server
+            .stream_notes(tonic::Request::new(StreamNotesRequest { tag: TAG_LOCAL_ANY, cursor }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        let update = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.notes.len(), 1);
+        assert_eq!(update.notes[0].details, stored.notes[1].details);
+        assert_eq!(update.cursor, u64::try_from(stored.notes[1].seq).unwrap());
+    }
+
+    #[tokio::test]
+    async fn stream_drains_more_than_one_page_in_order() {
+        let (server, database) = test_server_with_database().await;
+        let mut expected = Vec::new();
+        for value in 0..=crate::database::FETCH_NOTES_MAX_ROWS {
+            let details = value.to_le_bytes().to_vec();
+            database
+                .store_note(
+                    &StoredNote {
+                        header: test_note_header(),
+                        details: details.clone(),
+                        created_at: Utc::now(),
+                        seq: 0,
+                        after_block_num: None,
+                    },
+                    u64::MAX,
+                )
+                .await
+                .unwrap();
+            expected.push(details);
+        }
+
+        let response = server
+            .stream_notes(tonic::Request::new(StreamNotesRequest { tag: TAG_LOCAL_ANY, cursor: 0 }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first.notes.len(), crate::database::FETCH_NOTES_MAX_ROWS as usize);
+        assert_eq!(second.notes.len(), 1);
+        assert!(first.cursor < second.cursor);
+        let actual: Vec<_> =
+            first.notes.into_iter().chain(second.notes).map(|note| note.details).collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn slow_stream_receives_a_terminal_error() {
+        let metrics = Metrics::default();
+        let database = Arc::new(Database::connect_for_test(metrics.db.clone()).await.unwrap());
+        let tag = TAG_LOCAL_ANY.into();
+        for value in 0..=crate::database::FETCH_NOTES_MAX_ROWS {
+            database
+                .store_note(
+                    &StoredNote {
+                        header: test_note_header(),
+                        details: value.to_le_bytes().to_vec(),
+                        created_at: Utc::now(),
+                        seq: 0,
+                        after_block_num: None,
+                    },
+                    u64::MAX,
+                )
+                .await
+                .unwrap();
+        }
+
+        let changes = database.subscribe(tag);
+        let shutdown = CancellationToken::new();
+        let (tx, rx) = mpsc::channel(1);
+        let (terminal_tx, terminal_rx) = mpsc::channel(1);
+        let task = tokio::spawn(stream_notes(
+            database,
+            tag,
+            0,
+            changes,
+            shutdown,
+            tx,
+            terminal_tx,
+            metrics.grpc,
+            Duration::from_secs(1),
+        ));
+        let updates = tonic::codegen::tokio_stream::wrappers::ReceiverStream::new(rx);
+        let terminal = tonic::codegen::tokio_stream::wrappers::ReceiverStream::new(terminal_rx);
+        let mut stream = updates.chain(terminal);
+
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("slow stream task did not reach its timeout")
+            .unwrap();
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.notes.len(), crate::database::FETCH_NOTES_MAX_ROWS as usize);
+        let status = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
     }
 }
