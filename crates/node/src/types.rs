@@ -19,9 +19,7 @@ use miden_protocol::utils::serde::Serializable;
 pub struct StoredNote {
     /// Note header
     pub header: NoteHeader,
-    /// Note details
-    ///
-    /// Can be encrypted.
+    /// Serialized plaintext note details.
     pub details: Vec<u8>,
     /// Reference timestamp
     pub created_at: DateTime<Utc>,

@@ -60,7 +60,7 @@ struct ServeArgs {
     #[arg(long, env = "MNT_REQUEST_TIMEOUT", default_value = "4")]
     request_timeout: usize,
 
-    /// Maximum bytes retained for note headers and encrypted details.
+    /// Maximum bytes retained for note headers and details.
     #[arg(long, env = "MNT_MAX_STORAGE_BYTES")]
     max_storage_bytes: u64,
 }

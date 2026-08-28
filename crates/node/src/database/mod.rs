@@ -14,12 +14,12 @@ pub(crate) const FETCH_NOTES_MAX_ROWS: u32 = 500;
 /// Hard upper bound for one stored envelope and one fetched page.
 pub const FETCH_NOTES_MAX_BYTES: usize = 3 * 1024 * 1024;
 
-/// Result of storing an opaque note envelope.
+/// Result of storing a note.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreResult {
-    /// The envelope was committed with a new cursor.
+    /// The note was committed with a new cursor.
     Inserted,
-    /// An identical envelope was already present.
+    /// The note ID was already present.
     AlreadyPresent,
 }
 
@@ -120,7 +120,7 @@ impl Database {
         Ok(Self { backend: Arc::new(backend) })
     }
 
-    /// Store an envelope or recognize an identical retry.
+    /// Store a note or recognize a retry by note ID.
     pub async fn store_note(
         &self,
         note: &StoredNote,
@@ -155,50 +155,21 @@ impl Database {
     }
 }
 
-pub(crate) fn envelope_digest(note: &StoredNote) -> [u8; 32] {
-    use miden_protocol::utils::serde::Serializable;
-
-    let header = note.header.to_bytes();
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"miden-note-transport-envelope-v1");
-    hasher.update(&(header.len() as u64).to_le_bytes());
-    hasher.update(&header);
-    hasher.update(&(note.details.len() as u64).to_le_bytes());
-    hasher.update(&note.details);
-    match note.after_block_num {
-        Some(block_num) => {
-            hasher.update(&[1]);
-            hasher.update(&block_num.to_le_bytes());
-        },
-        None => {
-            hasher.update(&[0]);
-        },
-    }
-    *hasher.finalize().as_bytes()
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use miden_protocol::crypto::dsa::eddsa_25519_sha512::KeyExchangeKey;
-    use miden_protocol::crypto::ies::SealingKey;
-    use miden_protocol::utils::serde::{Deserializable, Serializable};
+    use miden_protocol::note::{NoteDetails, NoteHeader};
+    use miden_protocol::utils::serde::Serializable;
 
     use super::*;
     use crate::metrics::Metrics;
-    use crate::test_utils::{TAG_LOCAL_ANY, test_note_header};
+    use crate::test_utils::{TAG_LOCAL_ANY, test_note};
 
-    fn note(details: &[u8]) -> StoredNote {
-        let header = test_note_header();
-        let secret = KeyExchangeKey::read_from_bytes(&[7_u8; 32]).unwrap();
-        let sealing_key = SealingKey::X25519XChaCha20Poly1305(secret.public_key());
-        let details = sealing_key
-            .seal_bytes_with_associated_data(&mut rand::rng(), details, &header.to_bytes())
-            .unwrap()
-            .to_bytes();
+    fn note() -> StoredNote {
+        let note = test_note();
         StoredNote {
-            header,
-            details,
+            header: NoteHeader::from(&note),
+            details: NoteDetails::from(note).to_bytes(),
             created_at: Utc::now(),
             seq: 0,
             after_block_num: None,
@@ -210,19 +181,21 @@ mod tests {
     }
 
     async fn backend_contract(db: &Database) {
-        let first = note(&[1]);
+        let first = note();
         assert_eq!(db.store_note(&first, u64::MAX).await.unwrap(), StoreResult::Inserted);
         assert_eq!(db.store_note(&first, 0).await.unwrap(), StoreResult::AlreadyPresent);
 
-        let mut variant = first.clone();
-        variant.details = vec![2];
-        assert_eq!(first.header.id(), variant.header.id());
+        let mut retry = first.clone();
+        retry.after_block_num = Some(1);
+        assert_eq!(db.store_note(&retry, 0).await.unwrap(), StoreResult::AlreadyPresent);
+
+        let second = note();
         let first_size = (first.header.to_bytes().len() + first.details.len()) as u64;
         assert!(matches!(
-            db.store_note(&variant, first_size).await,
+            db.store_note(&second, first_size).await,
             Err(DatabaseError::Capacity(_))
         ));
-        assert_eq!(db.store_note(&variant, u64::MAX).await.unwrap(), StoreResult::Inserted);
+        assert_eq!(db.store_note(&second, u64::MAX).await.unwrap(), StoreResult::Inserted);
 
         let fetched = db.fetch_notes(TAG_LOCAL_ANY.into(), 0).await.unwrap();
         assert_eq!(fetched.notes.len(), 2);
@@ -246,7 +219,7 @@ mod tests {
 
         let postgres = Database::connect(config, Metrics::default().db).await.unwrap();
         backend_contract(&postgres).await;
-        let mut expired = note(&[4]);
+        let mut expired = note();
         expired.created_at = Utc::now() - chrono::Duration::days(2);
         postgres.store_note(&expired, u64::MAX).await.unwrap();
         assert_eq!(postgres.cleanup_old_notes(1, 1).await.unwrap(), 1);
@@ -267,9 +240,10 @@ mod tests {
     #[tokio::test]
     async fn sqlite_reads_and_cleanup_are_bounded() {
         let db = sqlite().await;
-        let mut first = note(&[1; 64]);
+        let mut first = note();
+        first.details = vec![1; 64];
         first.created_at = Utc::now() - chrono::Duration::days(2);
-        let mut second = first.clone();
+        let mut second = note();
         second.details = vec![2; 64];
         db.store_note(&first, u64::MAX).await.unwrap();
         db.store_note(&second, u64::MAX).await.unwrap();
@@ -290,8 +264,8 @@ mod tests {
     #[tokio::test]
     async fn sqlite_fetch_reports_more_rows() {
         let db = sqlite().await;
-        db.store_note(&note(&[1]), u64::MAX).await.unwrap();
-        db.store_note(&note(&[2]), u64::MAX).await.unwrap();
+        db.store_note(&note(), u64::MAX).await.unwrap();
+        db.store_note(&note(), u64::MAX).await.unwrap();
 
         let first = db
             .backend
@@ -318,20 +292,12 @@ mod tests {
     #[tokio::test]
     async fn envelopes_larger_than_a_fetch_page_are_rejected() {
         let db = sqlite().await;
-        let mut oversized = note(&[1]);
+        let mut oversized = note();
         oversized.details = vec![0; FETCH_NOTES_MAX_BYTES + 1];
 
         assert!(matches!(
             db.store_note(&oversized, u64::MAX).await,
             Err(DatabaseError::Capacity(_))
         ));
-    }
-
-    #[test]
-    fn digest_includes_the_complete_envelope() {
-        let plain = note(&[1]);
-        let mut different_context = plain.clone();
-        different_context.after_block_num = Some(1);
-        assert_ne!(envelope_digest(&plain), envelope_digest(&different_context));
     }
 }

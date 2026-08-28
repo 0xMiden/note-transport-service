@@ -1,7 +1,6 @@
 CREATE TABLE notes (
     seq INTEGER PRIMARY KEY,
-    envelope_digest BLOB NOT NULL UNIQUE,
-    id BLOB NOT NULL,
+    id BLOB NOT NULL UNIQUE,
     tag INTEGER NOT NULL,
     header BLOB NOT NULL,
     details BLOB NOT NULL,

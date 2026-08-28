@@ -16,7 +16,7 @@ use miden_note_transport_proto::miden_note_transport::v1::{
     StreamNotesRequest,
     TransportNote,
 };
-use miden_protocol::crypto::ies::SealedMessage;
+use miden_protocol::note::NoteDetails;
 use miden_protocol::utils::serde::Deserializable;
 use rand::RngExt;
 use tokio::sync::mpsc;
@@ -173,9 +173,14 @@ impl miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_
                 tracing::warn!(reason = "invalid_header", "send_note rejected");
                 Status::invalid_argument(format!("Invalid header: {e:?}"))
             })?;
-        if SealedMessage::read_from_bytes(&pnote.details).is_err() {
+        let details = NoteDetails::read_from_bytes(&pnote.details).map_err(|_| {
+            tracing::warn!(reason = "invalid_details", "send_note rejected");
+            Status::invalid_argument("Invalid note details")
+        })?;
+        if details.commitment() != header.details_commitment() {
+            tracing::warn!(reason = "details_commitment_mismatch", "send_note rejected");
             return Err(Status::invalid_argument(
-                "note details are not a valid sealed message",
+                "Note details do not match the note header",
             ));
         }
 
@@ -337,17 +342,64 @@ impl Drop for StreamerCtx {
 mod tests {
     use std::sync::Arc;
 
-    use miden_note_transport_proto::miden_note_transport::v1::FetchNotesRequest;
     use miden_note_transport_proto::miden_note_transport::v1::miden_note_transport_server::MidenNoteTransport;
+    use miden_note_transport_proto::miden_note_transport::v1::{
+        FetchNotesRequest,
+        SendNoteRequest,
+        TransportNote,
+    };
+    use miden_protocol::note::{Note, NoteDetails, NoteHeader};
+    use miden_protocol::utils::serde::Serializable;
 
     use super::*;
     use crate::database::Database;
     use crate::metrics::Metrics;
+    use crate::test_utils::test_note;
 
     async fn test_server() -> GrpcServer {
         let metrics = Metrics::default();
         let database = Arc::new(Database::connect_for_test(metrics.db.clone()).await.unwrap());
         GrpcServer::new(database, GrpcServerConfig::default(), metrics.grpc)
+    }
+
+    fn send_request(note: Note) -> tonic::Request<SendNoteRequest> {
+        let header = NoteHeader::from(&note).to_bytes();
+        let details = NoteDetails::from(note).to_bytes();
+        tonic::Request::new(SendNoteRequest {
+            note: Some(TransportNote { header, details, after_block_num: None }),
+        })
+    }
+
+    #[tokio::test]
+    async fn send_note_accepts_matching_plaintext_details() {
+        test_server().await.send_note(send_request(test_note())).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_note_rejects_malformed_details() {
+        let note = test_note();
+        let request = tonic::Request::new(SendNoteRequest {
+            note: Some(TransportNote {
+                header: NoteHeader::from(&note).to_bytes(),
+                details: vec![0],
+                after_block_num: None,
+            }),
+        });
+
+        let status = test_server().await.send_note(request).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn send_note_rejects_details_from_another_note() {
+        let header = NoteHeader::from(test_note()).to_bytes();
+        let details = NoteDetails::from(test_note()).to_bytes();
+        let request = tonic::Request::new(SendNoteRequest {
+            note: Some(TransportNote { header, details, after_block_num: None }),
+        });
+
+        let status = test_server().await.send_note(request).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 
     /// A client sending more tags than `MAX_TAGS_PER_FETCH_REQUEST` is rejected

@@ -3,7 +3,7 @@
 //! Implementation of the Miden Transport Layer node for private notes.
 //!
 //! The implementation is focused on performance and privacy.
-//! Only (optionally-encrypted) notes are stored.
+//! Only notes with valid plaintext details are stored.
 //!
 //! Features include,
 //! - sending and receiving notes;

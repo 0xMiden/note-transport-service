@@ -4,7 +4,7 @@ Node/server implementation of the Miden Transport Layer for private notes.
 
 ## API
 
-The node uses gRPC messages from the `miden-note-transport-proto` crate. `send_note()` stores an incoming note in the database. Note details may be encrypted.
+The node uses gRPC messages from the `miden-note-transport-proto` crate. `send_note()` checks that the plaintext note details match the note header before it stores the note.
 
 `fetch_notes()` returns a page for the requested note tags and cursor. `stream_notes()` keeps a subscription open for one tag and sends note updates to that client.
 
