@@ -440,6 +440,6 @@ mod tests {
             .unwrap();
         assert!(receiver.borrow_and_update().is_ready());
         assert!(notifications.is_ready());
-        task.abort();
+        drop(task);
     }
 }
