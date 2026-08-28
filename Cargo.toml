@@ -55,7 +55,7 @@ sqlx = { default-features = false, features = [
   "sqlite",
 ], version = "0.8" }
 thiserror = { default-features = false, version = "2.0" }
-tokio = { features = ["macros", "net", "rt-multi-thread", "signal"], version = "1.48" }
+tokio = { features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"], version = "1.48" }
 tokio-util = { features = ["rt"], version = "0.7" }
 tonic = { default-features = false, features = ["codegen", "transport"], version = "0.14" }
 tonic-health = { version = "0.14" }
