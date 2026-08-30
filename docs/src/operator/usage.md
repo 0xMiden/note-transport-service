@@ -12,8 +12,11 @@ For example,
 miden-note-transport-node \
   --host 0.0.0.0 \
   --port 57292 \
-  --database-url mtln.db
+  --database-url mtln.db \
+  --create-database
 ```
+
+Use `--create-database` only on first run (or when intentionally creating a new file). A missing file-backed path without this flag fails startup instead of silently creating an empty database.
 
 > [!NOTE]
 > `miden-note-transport-node` provides default arguments aimed at development.

@@ -6,7 +6,7 @@ services:
       dockerfile: bin/node/docker/Dockerfile
     ports:
       - "57292:57292"  # gRPC
-    command: ["miden-note-transport-node", "--host", "0.0.0.0", "--database-url", "/app/data/node.db"]
+    command: ["miden-note-transport-node", "--host", "0.0.0.0", "--database-url", "/app/data/node.db", "--create-database"]
     environment:
       - JSON_LOGGING=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
