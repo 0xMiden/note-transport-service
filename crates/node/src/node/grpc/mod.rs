@@ -258,7 +258,10 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             .await
             .map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
 
-        let mut rcursor = cursor;
+        // Start from the effective cursor (legacy timestamps → 0). Using the
+        // raw request cursor here left `rcursor ≈ 1.7e15` after a DB-side reset,
+        // so the client re-sent the same cursor and looped on the first batch.
+        let mut rcursor = crate::database::effective_fetch_cursor(cursor);
         for stored_note in &stored_notes {
             let seq_cursor: u64 = stored_note
                 .seq
@@ -394,5 +397,93 @@ mod tests {
         let response = result.expect("request at the cap must succeed").into_inner();
         assert_eq!(response.notes.len(), 0, "DB is empty, no notes returned");
         assert_eq!(response.cursor, 0);
+    }
+
+    /// Regression for #130: DB resets legacy microsecond cursors to 0 for the
+    /// query, but the response cursor must also start from that effective
+    /// value. Otherwise `rcursor = max(1.7e15, seq)` stays legacy and the
+    /// client permanently re-downloads the first batch.
+    #[tokio::test]
+    async fn test_fetch_notes_legacy_cursor_advances() {
+        use chrono::Utc;
+
+        use crate::database::LEGACY_CURSOR_THRESHOLD;
+        use crate::test_utils::{TAG_LOCAL_ANY, test_note_header};
+        use crate::types::StoredNote;
+
+        let server = test_server().await;
+
+        server
+            .database
+            .store_note(&StoredNote {
+                header: test_note_header(),
+                details: vec![1, 2, 3, 4],
+                created_at: Utc::now(),
+                seq: 0,
+                after_block_num: None,
+            })
+            .await
+            .unwrap();
+
+        let legacy_cursor: u64 = 1_760_000_000_000_000;
+        assert!(legacy_cursor > LEGACY_CURSOR_THRESHOLD);
+
+        let first = server
+            .fetch_notes(tonic::Request::new(FetchNotesRequest {
+                tags: vec![TAG_LOCAL_ANY],
+                cursor: legacy_cursor,
+            }))
+            .await
+            .expect("legacy cursor fetch must succeed")
+            .into_inner();
+
+        assert_eq!(first.notes.len(), 1, "legacy cursor should return notes after reset");
+        assert!(
+            first.cursor > 0 && first.cursor <= LEGACY_CURSOR_THRESHOLD,
+            "response cursor must be a seq, not the legacy timestamp; got {}",
+            first.cursor
+        );
+
+        let second = server
+            .fetch_notes(tonic::Request::new(FetchNotesRequest {
+                tags: vec![TAG_LOCAL_ANY],
+                cursor: first.cursor,
+            }))
+            .await
+            .expect("follow-up fetch must succeed")
+            .into_inner();
+
+        assert!(
+            second.notes.is_empty(),
+            "after advancing past the note seq, the same note must not be returned again"
+        );
+        assert_eq!(second.cursor, first.cursor);
+    }
+
+    /// Empty DB + legacy cursor: response cursor must reset to 0 so the client
+    /// converges even when the first page has no notes.
+    #[tokio::test]
+    async fn test_fetch_notes_legacy_cursor_empty_resets_rcursor() {
+        use crate::database::LEGACY_CURSOR_THRESHOLD;
+        use crate::test_utils::TAG_LOCAL_ANY;
+
+        let server = test_server().await;
+        let legacy_cursor: u64 = 1_760_000_000_000_000;
+        assert!(legacy_cursor > LEGACY_CURSOR_THRESHOLD);
+
+        let response = server
+            .fetch_notes(tonic::Request::new(FetchNotesRequest {
+                tags: vec![TAG_LOCAL_ANY],
+                cursor: legacy_cursor,
+            }))
+            .await
+            .expect("legacy cursor fetch must succeed")
+            .into_inner();
+
+        assert!(response.notes.is_empty());
+        assert_eq!(
+            response.cursor, 0,
+            "empty response must still return the effective cursor, not the legacy timestamp"
+        );
     }
 }

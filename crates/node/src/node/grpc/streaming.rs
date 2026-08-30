@@ -95,7 +95,9 @@ impl NoteStreamerManager {
         let mut updates = vec![];
         for (tag, tag_data) in &self.tags {
             let snotes = self.database.fetch_notes(*tag, tag_data.cursor).await?;
-            let mut cursor = tag_data.cursor;
+            // Match pull-side `fetch_notes`: advance from the effective cursor
+            // so a legacy microsecond timestamp does not pin the stream forever.
+            let mut cursor = crate::database::effective_fetch_cursor(tag_data.cursor);
             for snote in &snotes {
                 // Advance cursor using the DB-assigned monotonic `seq`
                 // (matches the pull-side fetch_notes contract). Using
