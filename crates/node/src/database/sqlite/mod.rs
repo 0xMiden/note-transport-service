@@ -84,6 +84,13 @@ impl DatabaseBackend for SqliteDatabase {
         metrics: MetricsDatabase,
     ) -> Result<Self, DatabaseError> {
         if !std::path::Path::new(&config.url).exists() && !config.url.contains(":memory:") {
+            if !config.create_if_missing {
+                return Err(DatabaseError::Configuration(format!(
+                    "Database file '{}' does not exist; pass --create-database to create it",
+                    config.url
+                )));
+            }
+
             std::fs::File::create(&config.url).map_err(|e| {
                 DatabaseError::Configuration(format!("Failed to create database file: {e}"))
             })?;
