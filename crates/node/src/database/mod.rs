@@ -60,6 +60,8 @@ pub struct Database {
 pub struct DatabaseConfig {
     /// Database URL
     pub url: String,
+    /// Whether a missing database file should be created during startup
+    pub create_if_missing: bool,
     /// Retention period in days
     pub retention_days: u32,
 }
@@ -68,6 +70,7 @@ impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             url: ":memory:".to_string(),
+            create_if_missing: false,
             retention_days: 30,
         }
     }
@@ -131,6 +134,14 @@ mod tests {
     use crate::metrics::Metrics;
     use crate::test_utils::{TAG_LOCAL_ANY, test_note_header, test_note_header_with_tag};
 
+    fn temporary_db_path(name: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after the Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("miden-note-transport-{name}-{unique}.sqlite3"))
+    }
+
     #[tokio::test]
     async fn test_sqlite_database() {
         let db = Database::connect(DatabaseConfig::default(), Metrics::default().db)
@@ -160,6 +171,56 @@ mod tests {
         let (total_notes, total_tags) = db.get_stats().await.unwrap();
         assert_eq!(total_notes, 1);
         assert_eq!(total_tags, 1);
+    }
+
+    #[tokio::test]
+    async fn test_file_database_must_exist_unless_creation_is_explicit() {
+        let path = temporary_db_path("missing-rejected");
+        let _ = std::fs::remove_file(&path);
+
+        let result = Database::connect(
+            DatabaseConfig {
+                url: path.display().to_string(),
+                ..Default::default()
+            },
+            Metrics::default().db,
+        )
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("missing file-backed databases must not be created implicitly"),
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, DatabaseError::Configuration(_)),
+            "expected a configuration error, got {err:?}"
+        );
+        assert!(
+            !path.exists(),
+            "a missing database file must not be created without create_if_missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_database_can_be_created_explicitly() {
+        let path = temporary_db_path("missing-created");
+        let _ = std::fs::remove_file(&path);
+
+        let db = Database::connect(
+            DatabaseConfig {
+                url: path.display().to_string(),
+                create_if_missing: true,
+                ..Default::default()
+            },
+            Metrics::default().db,
+        )
+        .await
+        .expect("explicit creation should allow first-run file databases");
+
+        assert!(path.exists(), "database file should be created explicitly");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

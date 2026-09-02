@@ -21,6 +21,10 @@ struct Args {
     #[arg(long, default_value = ":memory:")]
     database_url: String,
 
+    /// Create the database file if it does not already exist
+    #[arg(long)]
+    create_database: bool,
+
     /// Retention period in days
     #[arg(long, default_value = "30")]
     retention_days: u32,
@@ -72,6 +76,7 @@ async fn main() -> Result<()> {
         },
         database: DatabaseConfig {
             url: args.database_url,
+            create_if_missing: args.create_database,
             retention_days: args.retention_days,
         },
     };
