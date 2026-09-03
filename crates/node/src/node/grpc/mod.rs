@@ -1,7 +1,7 @@
 mod streaming;
 
 use std::collections::BTreeSet;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +41,13 @@ use crate::metrics::MetricsGrpc;
 /// A realistic wallet tracks O(10) to O(100) tags; 128 is generous without
 /// being an attack surface.
 const MAX_TAGS_PER_FETCH_REQUEST: usize = 128;
+
+fn socket_addr(host: &str, port: u16) -> crate::Result<SocketAddr> {
+    let ip = host
+        .parse::<IpAddr>()
+        .map_err(|e| crate::Error::Internal(format!("Invalid host: {e}")))?;
+    Ok(SocketAddr::new(ip, port))
+}
 
 /// Miden Note Transport gRPC server
 pub struct GrpcServer {
@@ -108,9 +115,7 @@ impl GrpcServer {
                 crate::Error::Internal(format!("Failed to build reflection service: {e}"))
             })?;
 
-        let addr = format!("{}:{}", self.config.host, self.config.port)
-            .parse::<SocketAddr>()
-            .map_err(|e| crate::Error::Internal(format!("Invalid address: {e}")))?;
+        let addr = socket_addr(&self.config.host, self.config.port)?;
 
         let cors = CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any);
 
@@ -357,6 +362,23 @@ mod tests {
             Database::connect(DatabaseConfig::default(), metrics.db.clone()).await.unwrap(),
         );
         GrpcServer::new(db, GrpcServerConfig::default(), metrics.grpc)
+    }
+
+    #[test]
+    fn test_socket_addr_accepts_ipv4_host() {
+        let addr = socket_addr("127.0.0.1", 57292).unwrap();
+        assert_eq!(addr, "127.0.0.1:57292".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn test_socket_addr_accepts_ipv6_host() {
+        let addr = socket_addr("::1", 57292).unwrap();
+        assert_eq!(addr, "[::1]:57292".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn test_socket_addr_rejects_invalid_host() {
+        assert!(socket_addr("localhost", 57292).is_err());
     }
 
     /// A client sending more tags than `MAX_TAGS_PER_FETCH_REQUEST` is rejected
