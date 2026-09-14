@@ -1,7 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
 
-use crate::database::{DatabaseBackend, DatabaseConfig, DatabaseError};
+use crate::database::{DatabaseBackend, DatabaseConfig, DatabaseError, normalize_legacy_cursor};
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteId, NoteTag, StoredNote};
 
@@ -18,18 +18,6 @@ use models::{NewNote, Note};
 /// deserialized batch) regardless of how far behind the client's cursor is. A
 /// backlogged client paginates naturally by re-calling with the returned cursor.
 pub(crate) const FETCH_NOTES_BATCH_SIZE: i64 = 500;
-
-/// Threshold above which a `fetch_notes` cursor is interpreted as a legacy
-/// microsecond-timestamp cursor from the pre-`seq` schema and reset to 0.
-///
-/// Before the `seq`-cursor migration, cursors were `created_at.timestamp_micros()`
-/// — values near 1.7×10^15. After migration, cursors are `seq` values starting
-/// at 1. Without this reset, any client that stored a cursor before migration
-/// would see zero notes forever (until `seq` caught up to their old timestamp,
-/// which at realistic insert rates is decades). 10^12 is two orders of magnitude
-/// above any plausible `seq` value we'd reach in the lifetime of this deployment,
-/// and two orders of magnitude below any microsecond timestamp this decade.
-const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
 
 /// `SQLite` implementation of the database backend
 pub struct SqliteDatabase {
@@ -157,13 +145,11 @@ impl DatabaseBackend for SqliteDatabase {
         // carry microsecond-timestamp cursors; interpret those as 0 so they
         // don't stall forever waiting for `seq` to catch up. Record a metric
         // so operators can see when pre-migration clients are being reset.
-        let effective_cursor = if cursor > LEGACY_CURSOR_THRESHOLD {
+        let effective_cursor = normalize_legacy_cursor(cursor);
+        if effective_cursor != cursor {
             self.metrics.db_fetch_notes_legacy_cursor_reset();
             tracing::info!(original_cursor = cursor, "Legacy cursor reset to 0");
-            0
-        } else {
-            cursor
-        };
+        }
 
         let cursor_i64: i64 = effective_cursor.try_into().map_err(|_| {
             DatabaseError::QueryExecution("Cursor too large for SQLite".to_string())

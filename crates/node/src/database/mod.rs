@@ -8,6 +8,23 @@ use self::sqlite::SqliteDatabase;
 use crate::metrics::MetricsDatabase;
 use crate::types::{NoteId, NoteTag, StoredNote};
 
+/// Threshold above which a fetch cursor is interpreted as a legacy
+/// microsecond-timestamp cursor from the pre-`seq` schema and reset to 0.
+///
+/// Before the `seq`-cursor migration, cursors were `created_at.timestamp_micros()`
+/// with values near 1.7×10^15. After migration, cursors are `seq` values starting
+/// at 1. Without this reset, any client that stored a cursor before migration
+/// would see zero notes forever (until `seq` caught up to their old timestamp,
+/// which at realistic insert rates is decades). 10^12 is two orders of magnitude
+/// above any plausible `seq` value we'd reach in the lifetime of this deployment,
+/// and two orders of magnitude below any microsecond timestamp this decade.
+const LEGACY_CURSOR_THRESHOLD: u64 = 1_000_000_000_000;
+
+/// Converts a pre-`seq` timestamp cursor to the beginning of the `seq` cursor space.
+pub(crate) fn normalize_legacy_cursor(cursor: u64) -> u64 {
+    if cursor > LEGACY_CURSOR_THRESHOLD { 0 } else { cursor }
+}
+
 /// Database operations
 #[async_trait::async_trait]
 pub trait DatabaseBackend: Send + Sync {
