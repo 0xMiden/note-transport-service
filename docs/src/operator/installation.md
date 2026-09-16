@@ -43,10 +43,16 @@ Clone the repository:
 git clone https://github.com/0xMiden/note-transport-service
 ```
 
-Then, move into the directory, `cd note-transport-service`, and run `make docker-node-up` to start the node and monitoring stack.
-To stop the stack, run `make docker-node-down`.
+Then, move into the directory, `cd note-transport-service`, set a strong Grafana administrator password, and run `make docker-node-up` to start the node and monitoring stack:
 
-Grafana will be accessible at `localhost:3000`.
+```sh
+export GRAFANA_ADMIN_PASSWORD="$(openssl rand -base64 32)"
+make docker-node-up
+```
+
+The compose file refuses to start Grafana when `GRAFANA_ADMIN_PASSWORD` is missing, so the monitoring stack never falls back to a publicly documented default credential. To stop the stack, run `make docker-node-down`.
+
+Grafana will be accessible at `localhost:3000` with the default administrator username `admin` and the password supplied through `GRAFANA_ADMIN_PASSWORD`.
 
 
 ## Updating
