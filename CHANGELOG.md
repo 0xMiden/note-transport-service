@@ -31,6 +31,12 @@ Skip the changelog only when the PR contains no runtime-affecting changes
 (docs, CI, tooling, tests). In that case the hook will tell you to apply the
 `no changelog` label instead.
 
+## v0.5.0-rc.3 (TBD)
+
+### Fixes
+
+- Fixed gRPC handlers to log internal backend errors server-side and return stable client messages ([#167](https://github.com/0xMiden/note-transport-service/pull/167)).
+
 ## v0.5.0-rc.2 (2026-08-27)
 
 ### Features

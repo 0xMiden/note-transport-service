@@ -42,6 +42,15 @@ use crate::metrics::MetricsGrpc;
 /// being an attack surface.
 const MAX_TAGS_PER_FETCH_REQUEST: usize = 128;
 
+/// Log an internal failure with its full context while returning only a stable message to clients.
+fn internal_status<E>(message: &'static str, source: E) -> Status
+where
+    E: std::fmt::Debug,
+{
+    tracing::error!(error = ?source, "{message}");
+    Status::internal(message)
+}
+
 /// Miden Note Transport gRPC server
 pub struct GrpcServer {
     database: Arc<Database>,
@@ -196,7 +205,8 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
 
         self.database
             .store_note(&note_for_db)
-            .await.map_err(|e| tonic::Status::internal(format!("Failed to store note: {e:?}")))?;
+            .await
+            .map_err(|e| internal_status("Failed to store note", e))?;
 
         timer.finish("ok");
 
@@ -256,7 +266,7 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
             .database
             .fetch_notes_by_tags(&tags, cursor)
             .await
-            .map_err(|e| tonic::Status::internal(format!("Failed to fetch notes: {e:?}")))?;
+            .map_err(|e| internal_status("Failed to fetch notes", e))?;
 
         let mut rcursor = cursor;
         for stored_note in &stored_notes {
@@ -304,8 +314,10 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         let (sub_tx, sub_rx) = mpsc::channel(32);
         let sub = Sub::new(id, tag, sub_rx, self.streamer.tx.clone());
         let subf = Subface::new(id, tag, sub_tx);
-        self.streamer.tx.try_send(StreamerMessage::AddSub(subf))
-                    .map_err(|e| tonic::Status::internal(format!("Failed sending internal streamer message: {e}")))?;
+        self.streamer
+            .tx
+            .try_send(StreamerMessage::AddSub(subf))
+            .map_err(|e| internal_status("Failed to send internal streamer message", e))?;
 
         Ok(tonic::Response::new(sub))
     }
@@ -318,7 +330,8 @@ impl miden_note_transport_proto::miden_note_transport::miden_note_transport_serv
         let (total_notes, total_tags) = self
             .database
             .get_stats()
-            .await.map_err(|e| tonic::Status::internal(format!("Failed to get stats: {e:?}")))?;
+            .await
+            .map_err(|e| internal_status("Failed to get stats", e))?;
 
         let response = StatsResponse {
             total_notes,
@@ -357,6 +370,18 @@ mod tests {
             Database::connect(DatabaseConfig::default(), metrics.db.clone()).await.unwrap(),
         );
         GrpcServer::new(db, GrpcServerConfig::default(), metrics.grpc)
+    }
+
+    #[test]
+    fn internal_status_does_not_expose_error_details() {
+        const CLIENT_MESSAGE: &str = "Failed to perform database operation";
+        const SENSITIVE_DETAIL: &str = "database path: /secret/operator/location.sqlite";
+
+        let status = internal_status(CLIENT_MESSAGE, SENSITIVE_DETAIL);
+
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), CLIENT_MESSAGE);
+        assert!(!status.message().contains(SENSITIVE_DETAIL));
     }
 
     /// A client sending more tags than `MAX_TAGS_PER_FETCH_REQUEST` is rejected
